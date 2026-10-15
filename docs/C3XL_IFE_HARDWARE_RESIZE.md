@@ -1,14 +1,14 @@
 # C3XL IFE hardware road-camera resize
 
-The C3XL OX03C10 road-camera path can explicitly opt in to 1344×760 IFE output before VisionIPC/model upload. It avoids the extra GPU resize, synchronization and copies from the software-resize experiment. Model weights, frame cadence, control permissions and frame-drop checks are unchanged.
+The C3XL OX03C10 road-camera path defaults to 1344×760 IFE output before VisionIPC/model upload when started through the normal launcher. This supplies the input size required by the CTM artifact without a device-local activation export. It avoids the extra GPU resize, synchronization and copies from the software-resize experiment. Model weights, frame cadence, control permissions and frame-drop checks are unchanged.
 
 ## Activation and scope
 
-Set `C3XL_IFE_ROAD_SIZE=1344x760` in the environment of the existing startup entry before launching openpilot; keep `C3XL_CTMV2_INPUT_RESIZE` unset. The source default is off. The verified device sets this in `/data/continue.sh`; this device-local activation file is not part of the repository.
+`launch_env.sh` exports `C3XL_IFE_ROAD_SIZE=1344x760` by default for the C3XL hardware profile; keep `C3XL_CTMV2_INPUT_RESIZE` unset. Existing explicit values, including an empty value, are preserved. Standard hardware does not receive this default. Direct process launches that bypass `launch_env.sh` must supply the resize environment explicitly.
 
-The camera override requires `/data/hardware_profile` to be exactly `c3xl`, OX03C10 at1928×1208, an IFE-processed stream and road camera0/1. The cabin/BPS stream and sensor mode remain unchanged. Other combinations retain their original output dimensions. The selector refuses startup when the requested IFE dimensions disagree with actual road streams.
+The camera override requires a C3XL build profile, OX03C10 at1928×1208, an IFE-processed stream and road camera0/1. Camera intrinsics use the existing hardware-profile resolver, matching the launcher and build, including recovery installs that infer C3XL from `comma tici` without a profile file. The cabin/BPS stream and sensor mode remain unchanged. Other combinations retain their original output dimensions. The selector refuses startup when the requested IFE dimensions disagree with actual road streams.
 
-IFE Y/UV dimensions, phase steps and output buffers are configured together. Road-camera intrinsics use independent horizontal/vertical factors; exposure windows, padded row access and camera-offset shear receive matching corrections. Existing original-resolution behavior is retained when the flag is unset. This is global road-stream resizing: the UI, model and other consumers share the smaller road images; it is not an additional private stream.
+IFE Y/UV dimensions, phase steps and output buffers are configured together. Road-camera intrinsics use independent horizontal/vertical factors; exposure windows, padded row access and camera-offset shear receive matching corrections. An explicit native-resolution override retains the original behavior. This is global road-stream resizing: the UI, model and other consumers share the smaller road images; it is not an additional private stream.
 
 ## Evidence
 
@@ -20,6 +20,6 @@ Register definitions and formula reference: Qualcomm MNDS16 Titan17x code and Ti
 
 ## Rollback
 
-Unset `C3XL_IFE_ROAD_SIZE` in the same startup environment and restart through the normal offroad lifecycle. This restores original road dimensions and geometry without deleting models or calibration. On the verified device, the deployment-specific rollback helper and originals are under `/data/c3xl-ife-deploy-20260913-v1/`; that helper is not a generic command for other installations.
+Set `export C3XL_IFE_ROAD_SIZE=1928x1208` in the startup environment before launching openpilot and restart through the normal offroad lifecycle. This restores original road dimensions and geometry without deleting models or calibration; unsetting the variable now selects the 1344×760 default again. Use a model artifact that supports the selected dimensions. Historical device-specific rollback material is under `/data/c3xl-ife-deploy-20260913-v1/`; its old helper predates the new default and must not be assumed to disable it.
 
-Only CTMv2 plus the selected TSFM fallback were checked here. Confirm other model artifacts provide the required resolution before using this opt-in with them. Hardware binaries, model files and private camera frames are not included in this source synchronization.
+Only CTMv2 plus the selected TSFM fallback were checked in the historical device run above. Confirm other model artifacts provide the required resolution before using them with this default. C3XL fallback builds include both 1344×760 and 1928×1208. Hardware binaries, model files and private camera frames are not included in this source synchronization.

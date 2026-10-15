@@ -29,7 +29,7 @@ if arch == 'comma_arm64':
   camera = _os_fisheye if HARDWARE.get_device_type() == "mici" else _ar_ox_fisheye
   camera_configs = [(camera.width, camera.height)]
   if get_hardware_profile() == HardwareProfile.C3XL:
-    # C3XL can opt in to 1344x760 IFE output while retaining its native 1928x1208 path.
+    # C3XL defaults to 1344x760 IFE output and supports an explicit 1928x1208 override.
     camera_configs = [(_ar_ox_fisheye.width, _ar_ox_fisheye.height),
                       (_os_fisheye.width, _os_fisheye.height)]
   tg_backend = 'QCOM'
