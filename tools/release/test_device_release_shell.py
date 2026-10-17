@@ -70,31 +70,6 @@ class TestDeviceReleaseShellBoilerplate(unittest.TestCase):
     self.assertGreaterEqual(self.src.count("run_stage \""), 5)
 
 
-class TestPinIntact(unittest.TestCase):
-  """pin 的 sha 对得上还不够：flat 树 git reset 会把 repo 内文件换回旧内容而 pin 不变，
-  只验 canary 在位会把旧 opendbc 当新的发出去（2026-10-04：card 因 structs.py 缺字段起不来）。"""
-
-  def _check(self, mutate=None) -> bool:
-    fn = re.search(r"^pin_intact\(\) \{.*?^\}", DEVICE.read_text(), re.M | re.S)
-    mat = re.search(r"^write_pin\(\) \{.*?^\}", DEVICE.read_text(), re.M | re.S)
-    self.assertTrue(fn and mat, "pin_intact / write_pin 必须定义")
-    with tempfile.TemporaryDirectory() as d:
-      src, pins = Path(d, "src"), Path(d, "pins")
-      (src / "repo").mkdir(parents=True)
-      (src / "repo" / "structs.py").write_text("new")
-      head = f'PIN_DIR="{pins}"; SRC="{src}"\n{mat.group(0)}\n{fn.group(0)}\n'
-      subprocess.run(["bash", "-c", head + 'write_pin repo SHA "$SRC/repo"'], check=True)
-      if mutate:
-        (src / "repo" / "structs.py").write_text(mutate)
-      return subprocess.run(["bash", "-c", head + 'pin_intact repo SHA']).returncode == 0
-
-  def test_intact(self):
-    self.assertTrue(self._check())
-
-  def test_stale_content_with_matching_sha_is_not_intact(self):
-    self.assertFalse(self._check(mutate="old"))
-
-
 class TestPublishRunsSmoke(unittest.TestCase):
   """发布末尾必须跑台架冒烟：部署成功不等于 onroad 能起来（card 启动即崩那次，发布脚本照样报 ok）。"""
 
@@ -109,27 +84,6 @@ class TestPublishRunsSmoke(unittest.TestCase):
   def test_smoke_failure_fails_publish_but_missing_jungle_only_skips(self):
     self.assertIn("3) echo \"[skip]", self.sh)
     self.assertIn("exit 1", self.sh[self.sh.rindex("smoke_after_build.sh"):])
-
-
-class TestPklCacheHit(unittest.TestCase):
-  """driving pkl 编完即切块、原文件删掉：缓存判定必须认切块产物，否则每次发版白编 ~11 分钟。"""
-
-  def _hit(self, files: dict[str, str], fp="FP") -> bool:
-    fn = re.search(r"^pkl_cache_hit\(\) \{.*?^\}", DEVICE.read_text(), re.M | re.S).group(0)
-    with tempfile.TemporaryDirectory() as d:
-      for name, body in files.items():
-        Path(d, name).write_text(body)
-      return subprocess.run(["bash", "-c", f'{fn}\npkl_cache_hit "$0/m.pkl" "$1"', d, fp]).returncode == 0
-
-  def test_whole_pkl_hit(self):
-    self.assertTrue(self._hit({"m.pkl": "x", "m.pkl.inputs_fp": "FP"}))
-
-  def test_chunked_pkl_hit(self):
-    self.assertTrue(self._hit({"m.pkl.chunkmanifest": "3", "m.pkl.inputs_fp": "FP"}))
-
-  def test_miss_on_changed_fingerprint_or_no_artifact(self):
-    self.assertFalse(self._hit({"m.pkl": "x", "m.pkl.inputs_fp": "OLD"}))
-    self.assertFalse(self._hit({"m.pkl.inputs_fp": "FP"}))
 
 
 if __name__ == "__main__":

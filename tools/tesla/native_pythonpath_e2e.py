@@ -10,7 +10,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root/'tools/release/device_release.sh').read_text()
-assignment = re.search(r'^\s*SKIP_CAPNP_REGEN=1 PYTHONPATH=.*', source, re.M).group().strip().rstrip('\\').strip()
+assignment = re.search(r'^\s*PYTHONPATH=.*', source, re.M).group().strip().split(' scons ', 1)[0]
 results = []
 with tempfile.TemporaryDirectory(prefix='native path ') as tmp:
   tmp = Path(tmp); src = tmp/'source'; deps = tmp/'caller deps'

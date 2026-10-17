@@ -2,24 +2,24 @@
 #
 # publish_release_from_device.sh — 一键发布编排器（Mac 侧）。
 #
-# 固化流程（2026-09-25）：Mac 单测 → 辅助文件 → 设备侧 nohup 发布 → 轮询 →
+# 流程：Mac 检查 → 设备侧独立构建 → 轮询 →
 # 中继三步（取 relstage / push fork / 设备消费）→ 重启 → 上机验证。
-# 发布从此就是这一条命令（纯 Python 改动约 3 分钟；换 pin/换模型才走全量重编）。
+# 每次请求全量构建，未变输入通过 SCons 缓存复用。
 #
 # 用法: tools/release/publish_release_from_device.sh [--skip-tests] [--skip-smoke]
 #       末尾默认跑台架冒烟 tools/bench/smoke_after_build.sh（jungle 点火回放，验证核心进程 onroad 稳定）；
 #       没接 jungle 时自动跳过，--skip-smoke 强制跳过。
 # 环境: DEVICE=comma@10.0.0.27 可覆盖
 #       SRC_BRANCH / RELEASE_BRANCH 透传给设备侧 device_release.sh
-#       （缺省 lean-master / lean-release；如 SRC_BRANCH=big-uplink RELEASE_BRANCH=big-release）
+#       （缺省 dev-sp-chipmunk / lean-tesla-release-c3）
 #       ADB_SERIAL=55873f9 走 adb 隧道（DEVICE=c4usb → localhost:2222）时设上，重启后自动重建转发
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 ROOT="$(cd "$DIR/../.." && pwd)"
 DEVICE="${DEVICE:-comma@10.0.0.27}"
-SRC_BRANCH="${SRC_BRANCH:-lean-master}"
-RELEASE_BRANCH="${RELEASE_BRANCH:-lean-release}"
+SRC_BRANCH="${SRC_BRANCH:-dev-sp-chipmunk}"
+RELEASE_BRANCH="${RELEASE_BRANCH:-lean-tesla-release-c3}"
 SKIP_TESTS=0
 SKIP_SMOKE=0
 for arg in "$@"; do
@@ -37,15 +37,11 @@ if [ "$SKIP_TESTS" -eq 0 ]; then
     tools/release/test_release_lib.py)
 fi
 
-echo "[-] 推送发布辅助文件（/tmp 随设备重启被清——先建目录，勿省）"
-ssh "$DEVICE" 'mkdir -p /tmp/relhelper'
-scp -q "$DIR/release_lib.py" "$DEVICE:/tmp/relhelper/"
+echo "[-] 推送设备构建脚本"
 scp -q "$DIR/device_release.sh" "$DEVICE:/tmp/device_release.sh"
 
 echo "[-] 设备侧发布（nohup + 轮询；含 scons/键表门禁/schema 门禁/打包）"
-# 清树：上一次发布/调试留下的同步状态会让前提检查（树必须干净）误判。
-# reset 绝不接管道（SIGPIPE 会掐死 reset，见 ADR 发布基建三连坑）。
-ssh "$DEVICE" 'cd /data/openpilot && git reset -q --hard HEAD 2>/dev/null; (setsid nohup env SRC_BRANCH='"$SRC_BRANCH"' RELEASE_BRANCH='"$RELEASE_BRANCH"' bash /tmp/device_release.sh > /tmp/release.log 2>&1 & echo $! > /tmp/release.pid)'
+ssh "$DEVICE" '(setsid nohup env SRC_BRANCH='"$SRC_BRANCH"' RELEASE_BRANCH='"$RELEASE_BRANCH"' bash /tmp/device_release.sh > /tmp/release.log 2>&1 & echo $! > /tmp/release.pid)'
 while ssh -o ConnectTimeout=10 "$DEVICE" 'kill -0 "$(cat /tmp/release.pid)" 2>/dev/null'; do
   sleep 20
 done
@@ -61,7 +57,7 @@ RELEASE_SHA=$(git rev-parse refs/temp/device-release)
 PUSHED=0
 for _ in 1 2 3; do
   # 目标必须全限定：新分支（如 big-release）远端不存在时 git 拒绝 DWIM 猜名
-  if git push -f fork refs/temp/device-release:"refs/heads/$RELEASE_BRANCH"; then
+  if git push -f origin refs/temp/device-release:"refs/heads/$RELEASE_BRANCH"; then
     PUSHED=1
     break
   fi

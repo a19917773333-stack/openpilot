@@ -10,7 +10,7 @@ import tempfile
 source=(Path(__file__).resolve().parents[2]/'tools/release/device_release.sh').read_text()
 def function(name):
  return re.search(r'^'+name+r'\(\) \{\n.*?^\}',source,re.M|re.S).group()
-stages=source[source.index('run_stage "前提检查"'):source.index('run_stage "capnp schema/gen')]
+stages=source[source.index('run_stage "前提检查"'):source.index('run_stage "验证构建产物"')]
 rows=[]
 with tempfile.TemporaryDirectory() as tmp:
  for failing in ('0','1'):
@@ -32,6 +32,6 @@ compile_driving_pkl() { echo model >> "$EVENTS"; }
   assert events[0]=='prereqs' and events[-1]=='sudo systemctl start comma',events
   assert events.count('sudo systemctl stop comma')==1,events
   assert events.index('prereqs') < events.index('sudo systemctl stop comma') < events.index('sync') < events.index('build'),events
-  assert ('model' in events)==(failing=='0')
+  assert ('gitlinks' in events) and ('build' in events)
   rows.append({'build_failure':bool(int(failing)),'exit':p.returncode,'events':events})
 print(json.dumps({'pass':True,'scope':'actual stage and cleanup shell with no-op systemctl; no hardware','cases':rows},indent=2))
