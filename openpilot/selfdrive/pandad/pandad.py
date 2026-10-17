@@ -118,6 +118,8 @@ def main() -> None:
       cloudlog.event("pandad.panda_startup", result=startup_result.value, count=count)
       if startup_result == PandaStartupResult.INTERRUPTED:
         break
+      if startup_result == PandaStartupResult.RESET:
+        Panda.wait_for_panda(None, 2)
 
       # Flash all Pandas in DFU mode
       for serial in PandaDFU.list():
@@ -126,7 +128,7 @@ def main() -> None:
         time.sleep(1)
 
       panda_serials = Panda.list()
-      if len(panda_serials):
+      if len(panda_serials) and not do_exit:
         # custom flasher for xnor's Rivian Longitudinal Upgrade Kit
         flash_rivian_long(panda_serials)
         # find the internal supported panda (e.g. skip external Black Panda)
@@ -136,9 +138,12 @@ def main() -> None:
         cloudlog.info(f"{len(panda_serials)} panda found, connecting - {panda_serials}")
         flash_panda(panda_serials[0])
 
+      if len(panda_serials) and not do_exit:
         # run real pandad
         os.environ['MANAGER_DAEMON'] = 'pandad'
         process = subprocess.Popen(["./pandad", panda_serials[0]], cwd=os.path.join(BASEDIR, "openpilot/selfdrive/pandad"))
+        if do_exit:
+          process.send_signal(signal.SIGINT)
         process.wait()
     # TODO: wrap all panda exceptions in a base panda exception
     except (usb1.USBErrorNoDevice, usb1.USBErrorPipe):
