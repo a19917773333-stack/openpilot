@@ -142,13 +142,22 @@ void MetaProvider::warp(bool wide, float out[9]) const {
 void MetaProvider::recompute_locked() {
   get_warp_matrix(rpy_, intrinsics_road_, false, warp_road_);
   get_warp_matrix(rpy_, intrinsics_wide_, true, warp_wide_);
+  for (bool wide : {false, true}) {
+    const float* k = wide ? intrinsics_wide_ : intrinsics_road_;
+    float* warp = wide ? warp_wide_ : warp_road_;
+    const float shear = camera_offset_ / camera_height_;
+    const float translation = -camera_offset_ / camera_height_ * (k[5] - k[4] * std::tan(rpy_[1]));
+    for (int i = 0; i < 3; ++i) warp[i] += shear * warp[i+3] + translation * warp[i+6];
+  }
 }
 
-void MetaProvider::set_rpy(const float rpy[3]) {
+void MetaProvider::set_rpy(const float rpy[3], float height, float offset) {
   std::lock_guard<std::mutex> lk(mtx_);
   rpy_[0] = rpy[0];
   rpy_[1] = rpy[1];
   rpy_[2] = rpy[2];
+  camera_height_ = height;
+  camera_offset_ = 0.9 * camera_offset_ + 0.1 * offset;
   recompute_locked();
 }
 

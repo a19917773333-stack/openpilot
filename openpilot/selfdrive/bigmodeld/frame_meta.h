@@ -46,7 +46,7 @@ class MetaProvider {
   bool set_camera_geometry(bool wide, CameraModel sensor, int width, int height);
 
   // extrinsicsCalibration.rpyCalib 更新时调用（任意线程）。
-  void set_rpy(const float rpy[3]);
+  void set_rpy(const float rpy[3], float height = 1.22f, float offset = 0.f);
 
   // modeld 上行元数据（04 号 C-2，modelDataV2SP）更新时调用（任意线程）：
   // action_t = chestnut 公式（research/02 §4），desire_class = DH.desire 电平。
@@ -71,6 +71,8 @@ class MetaProvider {
   float intrinsics_road_[9] = {};
   float intrinsics_wide_[9] = {};
   float rpy_[3] = {0.f, 0.f, 0.f};
+  double camera_offset_ = 0.;
+  float camera_height_ = 1.22f;
   float warp_road_[9] = {0};
   float warp_wide_[9] = {0};
   float action_t_[2] = {0.f, 0.f};

@@ -2,16 +2,20 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 #include "frame_meta.h"
 #include "warp_pack.h"
 
-int main() {
+int main(int argc, char** argv) {
   MetaProvider provider;
   chipmunk::WarpLut lut;
   const float rpy[3] = {0.01f, -0.02f, 0.005f};
-  provider.set_rpy(rpy);
+  const float physical_height = 1.22f;
+  const float offset = argc > 1 ? std::strtof(argv[1], nullptr) : 0.f;
+  for (int i = 0; i < 12; ++i) provider.set_rpy(rpy, physical_height, offset);
+  const double filtered_offset = offset * (1. - std::pow(0.9, 12));
   std::puts("{\"cases\":[");
   bool comma = false;
   for (CameraModel sensor : {CameraModel::AR_OX, CameraModel::OS04C10}) {
@@ -29,8 +33,14 @@ int main() {
         assert(camera_intrinsics(sensor, wide, width, height, intrinsics));
         assert(std::memcmp(reference_k, intrinsics, sizeof intrinsics) == 0);
         get_warp_matrix(rpy, reference_k, wide, expected);
-        assert(std::memcmp(expected, actual, sizeof actual) == 0);
-        if (sensor == CameraModel::OS04C10) {
+        const float shear = filtered_offset / physical_height;
+        const float translation = -filtered_offset / physical_height * (reference_k[5] - reference_k[4] * std::tan(rpy[1]));
+        for (int i = 0; i < 3; ++i) expected[i] += shear * expected[i+3] + translation * expected[i+6];
+        for (int i = 0; i < 9; ++i) {
+          if (std::abs(expected[i] - actual[i]) >= 0.0002f) std::fprintf(stderr, "sensor=%d wide=%d offset=%g i=%d expected=%g actual=%g\n", int(sensor), wide, offset, i, expected[i], actual[i]);
+          assert(std::abs(expected[i] - actual[i]) < 0.0002f);
+        }
+        if (sensor == CameraModel::OS04C10 && offset == 0.f) {
           float legacy[9];
           get_warp_matrix(rpy, wide ? kWideRoadIntrinsics : kNarrowRoadIntrinsics, wide, legacy);
           assert(std::memcmp(legacy, actual, sizeof actual) == 0);
@@ -43,7 +53,7 @@ int main() {
         chipmunk::Nv12Out dst{got.data(), got.data()+out_stride*out_height, out_stride, out_stride};
         chipmunk::Nv12Out oracle{ref.data(), ref.data()+out_stride*out_height, out_stride, out_stride};
         assert(lut.warp(src, actual, dst));
-        assert(chipmunk::warpNv12(src, expected, oracle));
+        assert(chipmunk::warpNv12(src, actual, oracle));
         assert(got == ref);
         bgm1::FrameHeader header, decoded;
         provider.fill(123, &header);
@@ -54,8 +64,8 @@ int main() {
         assert(std::memcmp(wide ? decoded.warp_wide : decoded.warp_road, actual, sizeof actual) == 0);
         if (comma) std::puts(",");
         comma = true;
-        std::printf("{\"sensor\":\"%s\",\"width\":%d,\"height\":%d,\"wide\":%s,\"passed\":true,\"warp\":[",
-                    sensor == CameraModel::AR_OX ? "ar_ox" : "os04c10", width, height, wide ? "true" : "false");
+        std::printf("{\"sensor\":\"%s\",\"width\":%d,\"height\":%d,\"offset\":%.9g,\"wide\":%s,\"passed\":true,\"warp\":[",
+                    sensor == CameraModel::AR_OX ? "ar_ox" : "os04c10", width, height, offset, wide ? "true" : "false");
         for (int i = 0; i < 9; ++i) std::printf("%s%.9g", i ? "," : "", actual[i]);
         std::printf("]}");
       }

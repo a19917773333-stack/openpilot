@@ -30,6 +30,7 @@
 #include <cerrno>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -464,6 +465,7 @@ class Bigmodeld {
   // ===== 标定/输入元数据线程：extrinsicsCalibration.rpyCalib + modelDataV2SP → 帧头 =====
   void calib_thread() {
     SubMaster sm({"extrinsicsCalibration", "modelDataV2SP"});
+    Params params;
     while (!do_exit) {
       sm.update(1000);
       if (sm.updated("extrinsicsCalibration")) {
@@ -471,7 +473,9 @@ class Bigmodeld {
         auto rpy = c.getRpyCalib();
         if (rpy.size() == 3) {
           float r[3] = {rpy[0], rpy[1], rpy[2]};
-          meta_.set_rpy(r);
+          auto height = c.getHeight();
+          const float offset = std::strtof(params.get("CameraOffset").c_str(), nullptr);
+          meta_.set_rpy(r, height.size() ? height[0] : 1.22f, offset);
         }
       }
       // 04 号 C-2：modeld 权威元数据（电平采样，迟到 ≤2 帧按 04 号口径接受）
