@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep dev-sp boot chains byte-equivalent, use lean system on C3 and C3XL."""
+"""Keep dev-sp boot chains and system byte-equivalent on C3 and C3XL."""
 import json
 from pathlib import Path
 import sys
@@ -15,8 +15,8 @@ def load(path):
 
 
 def build(profile):
-  devsp, lean = load(REF / f"devsp-{profile}.json"), load(REF / "lean-c4.json")
-  return [devsp[name] for name in CHAIN] + [lean["system"]]
+  devsp = load(REF / f"devsp-{profile}.json")
+  return [devsp[name] for name in (*CHAIN, "system")]
 
 
 if __name__ == "__main__":

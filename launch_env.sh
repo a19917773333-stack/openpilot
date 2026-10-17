@@ -18,14 +18,6 @@ export QCOM_PRIORITY=12
 # lean build: no driver monitoring, cabin camera unused
 export DISABLE_DRIVER=1
 
-if [ -z "$AGNOS_VERSION" ]; then
-  export AGNOS_VERSION="19.6.27"
-fi
-
-if [ -z "$AGNOS_ACCEPTED_VERSIONS" ]; then
-  export AGNOS_ACCEPTED_VERSIONS="$AGNOS_VERSION"
-fi
-
 export STAGING_ROOT="/data/safe_staging"
 
 # A tici device-tree name cannot distinguish C3 from C3XL.
@@ -41,11 +33,22 @@ export AGNOS_SKIP_UPDATE=0
 case "$device_model" in
   *tici)
     case "$profile_value" in
-      c3|c3xl) AGNOS_MANIFEST_FILE="openpilot/common/hardware/comma/agnos-$profile_value.json" ;;
+      c3|c3xl)
+        AGNOS_MANIFEST_FILE="openpilot/common/hardware/comma/agnos-$profile_value.json"
+        export AGNOS_VERSION="${AGNOS_VERSION:-19.7}"
+        ;;
       *) AGNOS_SKIP_UPDATE=1 ;;
     esac ;;
 esac
 export AGNOS_MANIFEST_FILE AGNOS_SKIP_UPDATE
+
+if [ -z "$AGNOS_VERSION" ]; then
+  export AGNOS_VERSION="19.6.27"
+fi
+
+if [ -z "$AGNOS_ACCEPTED_VERSIONS" ]; then
+  export AGNOS_ACCEPTED_VERSIONS="$AGNOS_VERSION"
+fi
 
 # Match the validated IFE road output and its model/UI intrinsics on C3XL.
 if [ "$profile_value" = "c3xl" ]; then

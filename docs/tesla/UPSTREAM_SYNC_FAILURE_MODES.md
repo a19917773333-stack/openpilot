@@ -35,3 +35,25 @@ Forward path: separate scoped commits for runtime fixes, model geometry/timing,
 release and manifests. Rollback: revert the corresponding commits in reverse
 order; no parameter migration or device rollback is needed for host-only work.
 Repeatable host pipeline scripts and JSON/hash artifacts accompany the changes.
+
+## Follow-up: use the dev-sp system image too
+
+The user now requires C3/C3XL `system` to match `onemiless/openpilot:dev-sp`,
+in addition to ABL/boot. Source was refreshed at
+`f400fc5e56839c3ece7f999d18bd54842900df21`: AGNOS 19.7. This supersedes the
+earlier decision to retain lean's 19.6.27 system for those profiles.
+
+Failures to reject before implementation:
+
+- Copying only the URL while retaining lean's sparse/raw hashes, verification
+  marker, size or alternate-image fields creates an inconsistent manifest.
+- Keeping 19.6.27 in the launcher's accepted-version default skips the requested
+  system update; the target and accepted defaults must both become 19.7.
+- A global version bump would make C4's unchanged manifest disagree with its
+  required version. Resolve defaults through the existing hardware/profile gate.
+- Regenerating manifests must reproduce the full selected SP entries and keep
+  ABL/boot unchanged; updater/setup code remains excluded.
+
+Acceptance is an offline manifest-generation and launch-selection pipeline with
+JSON evidence, including source equality and version/profile selection. No
+device flashing or image execution is included. Roll back with one scoped revert.

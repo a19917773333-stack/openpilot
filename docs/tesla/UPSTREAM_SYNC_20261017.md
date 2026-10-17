@@ -26,25 +26,38 @@ Source branch: `onemiless/openpilot:dev-sp-chipmunk`, original
 ## User constraints and deferred work
 
 The user explicitly excludes updater and installation-connectivity fixes.
-The updater binary, updater/setup Python files, launch environment and all
-AGNOS manifests remain byte-identical to the original source commit.
+The updater binary and updater/setup Python files remain byte-identical to
+the original source commit.
 
-ABL and boot entries for C3/C3XL match `onemiless/openpilot:dev-sp` at remote
+ABL, boot and system entries for C3/C3XL match `onemiless/openpilot:dev-sp` at remote
 `f400fc5e56839c3ece7f999d18bd54842900df21`, including URL, hashes, sizes and slot
 policy. The local dev-sp tip was advancing concurrently; its boot entries also
-matched. C4 retains its own hardware-specific manifest. No partition is read
-or written by this work, and AGNOS stays 19.6.27.
+matched. The user's follow-up explicitly changes C3/C3XL from lean's system to
+dev-sp's AGNOS 19.7 system, superseding D2 in the original port reference plan.
+The manifest generator now takes the complete system entry from dev-sp too.
+C4 retains its original manifest and 19.6.27 target. No partition is read or
+written by this work.
+
+C3/C3XL launch defaults now require and accept 19.7. Overlay restart clears both
+inherited version variables so an old 19.6.27 accepted-version default cannot
+skip the transition. Explicit caller overrides remain supported. This changes
+the version/manifest configuration, not the updater binary or setup networking.
 
 The proposed new-domain 19.6.27 system image returned HTTP 403 for HEAD and 404
 for a ranged GET. Its URL was therefore not adopted. Toyota diagnostic/CAN
 ownership features, Gitee mirroring, default never-power-off, and AGNOS 19.6.28
-are excluded. No submodule pin changes.
+are excluded. The later dev-sp system selection uses its existing 19.7 image
+URL instead. No submodule pin changes.
 
 ## Evidence and scope
 
 Artifacts: `/Users/mile/work/tesla-port/upstream-sync-20261017`.
 The final `RESULT.json` identifies the exact source commit, verification scope,
 unchanged-file hashes and commit list; `SHA256SUMS.json` covers the evidence.
+These are the immutable results for the initial three-commit sync. The system
+follow-up is recorded separately in
+`/Users/mile/work/tesla-port/system-sync-20261017`, including live source
+snapshots, expected pre-change failures and the final manifest/launch replay.
 
 Host evidence includes:
 
@@ -54,7 +67,10 @@ Host evidence includes:
 - Clean-build Git/submodule workflow and injected artifact failures: 7 cases;
   release profile matrix: 18 cases; service cleanup: 2 cases; failed checkout
   boundary: 4 cases; inherited dependency paths: 3 cases.
-- Boot entry equality: 4 cases; 8 excluded files remain byte-identical.
+- Initial boot entry equality: 4 cases; 8 files were unchanged at that stage.
+  System follow-up: 6 ABL/boot/system equality cases, 10 launch/profile/restart
+  cases and 5 unchanged updater/setup/C4-manifest files pass. Both generated
+  C3/C3XL manifests match their complete source references.
 - Existing model/Panda regressions: 24 passed; release regressions: 84 passed;
   native bigmodeld: 660 checks, zero failures; WarpLut/golden regressions pass.
 
@@ -80,9 +96,12 @@ OUT=/Users/mile/work/tesla-port/upstream-sync-20261017
 "$PY" tools/tesla/camera_offset_pipeline_e2e.py --output "$OUT/camera-after.json"
 "$PY" tools/tesla/release_build_tree_e2e.py --output "$OUT/release-after.json"
 "$PY" tools/tesla/bootchain_parity_e2e.py --source-repo /Users/mile/Desktop/mo-op \
-  --source-ref f400fc5e56839c3ece7f999d18bd54842900df21 --output "$OUT/bootchain-parity.json"
+  --source-ref f400fc5e56839c3ece7f999d18bd54842900df21 \
+  --output /Users/mile/work/tesla-port/system-sync-20261017/after.json
 ```
 
 Runtime/model/release changes are separate commits. Revert them in reverse
-order to restore the original source. No persistent parameter migration or
-device rollback is involved in these host-only changes.
+order to restore the original source. Revert the separate system-follow-up
+commit to restore the previous 19.6.27 manifest/launch defaults. These host
+changes perform no device update; any later physical OS transition needs its
+own device build, verification and rollback plan.

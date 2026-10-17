@@ -71,7 +71,7 @@ function launch {
           cd $DIR
 
           echo "Restarting launch script ${LAUNCHER_LOCATION}"
-          unset AGNOS_VERSION
+          unset AGNOS_VERSION AGNOS_ACCEPTED_VERSIONS
           exec "${LAUNCHER_LOCATION}"
         else
           echo "openpilot backup found, not updating"

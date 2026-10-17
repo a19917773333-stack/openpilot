@@ -12,6 +12,7 @@ for profile in ("c3", "c3xl"):
   parts = json.loads((OUT / f"agnos-{profile}.json").read_text())
   assert parts == build(profile)
   by_name = {p["name"]: p for p in parts}
+  assert by_name["system"] == load(REF / f"devsp-{profile}.json")["system"]
   assert by_name["boot"]["hash"] != lean["boot"]["hash"]
   validate_agnos_manifest(parts, HardwareProfile(profile))
   for name in CHAIN:
