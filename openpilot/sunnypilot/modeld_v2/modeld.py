@@ -486,6 +486,7 @@ def main(demo=False):
     if 'action_t' in model.numpy_inputs:
       inputs['action_t'] = np.array([lat_action_t, long_action_t], dtype=np.float32)
 
+    # Jetlink uses control state and dropped-frame share to decide safe handovers.
     model.in_control = jetlink_adapter.in_control(sm)
     model.frame_drop_ratio = frame_drop_ratio
     handovers = getattr(model, 'handovers', 0)
@@ -509,6 +510,7 @@ def main(demo=False):
     model_execution_time = mt2 - mt1
     if getattr(model, 'handovers', 0) != handovers:
       run_count = 0
+      frame_drop_ratio = 0.
 
     if model_output is not None:
       modelv2_send = messaging.new_message('modelV2')
