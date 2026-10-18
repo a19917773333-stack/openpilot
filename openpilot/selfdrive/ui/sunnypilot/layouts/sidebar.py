@@ -12,7 +12,8 @@ from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.widgets import DialogResult
 from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog
 from openpilot.selfdrive.ui.egpu_status import (
-  build_egpu_sidebar_status, chestnut_usb_speed_mbps, classify_egpu_link_state, resolve_egpu_connection,
+  build_egpu_sidebar_status, build_jetlink_gpu_status, chestnut_usb_speed_mbps, classify_egpu_link_state,
+  resolve_egpu_connection,
 )
 
 
@@ -67,6 +68,10 @@ class SidebarSP:
     self._egpu_detail = "未检测到 eGPU USB 设备"
 
   def _update_egpu_status(self):
+    if (view := ui_state.jetlink_view) is not None:
+      self._update_jetlink_status(view)
+      return
+
     present = resolve_egpu_connection(ui_state.sm["deviceState"])
     eject_status = ui_state.params.get("UsbGpuEjectStatus")
     speed_mbps = chestnut_usb_speed_mbps(ui_state.sm["deviceState"])
@@ -90,28 +95,53 @@ class SidebarSP:
       loading_progress=ui_state.usbgpu_loading_progress,
       model_failed=ui_state.big_model_failed,
     )
-    color = {
-      "good": Colors.GOOD,
-      "warning": Colors.WARNING,
-      "danger": Colors.DANGER,
-      "progress": Colors.PROGRESS,
-      "disabled": Colors.DISABLED,
-    }[status.severity]
-    icon = {
-      "good": self._egpu_icon,
-      "warning": self._egpu_icon_orange,
-      "danger": self._egpu_icon_crossed,
-      "progress": self._egpu_icon_gray,
-      "disabled": self._egpu_icon_gray,
-    }[status.severity]
+    color = self._status_color(status.severity)
+    icon = self._status_icon(status.severity)
     if status.value == "REMOVE":
       icon = self._egpu_icon_gray
     self._egpu_detail = status.detail
     self._egpu_status.update("eGPU", status.value, color, icon)
 
+  def _update_jetlink_status(self, view):
+    """The same tile when the phone, over JetLink, is the accelerator."""
+    sm = ui_state.sm
+    running_big = bool(sm.alive["modelV2"] and sm["modelV2"].big)
+    status = build_jetlink_gpu_status(
+      state=ui_state.chestnut_state.value,
+      present=bool(view.present),
+      progress=view.progress,
+      frame_ms=float(sm["modelV2"].modelExecutionTime) * 1000.0 if running_big else 0.0,
+      model=(view.model or "") if running_big else "",
+    )
+    self._egpu_detail = status.detail
+    self._egpu_status.update("GPU", status.value, self._status_color(status.severity),
+                             self._status_icon(status.severity))
+
+  def _status_color(self, severity: str) -> rl.Color:
+    return {
+      "good": Colors.GOOD,
+      "warning": Colors.WARNING,
+      "danger": Colors.DANGER,
+      "progress": Colors.PROGRESS,
+      "disabled": Colors.DISABLED,
+    }[severity]
+
+  def _status_icon(self, severity: str):
+    return {
+      "good": self._egpu_icon,
+      "warning": self._egpu_icon_orange,
+      "danger": self._egpu_icon_crossed,
+      "progress": self._egpu_icon_gray,
+      "disabled": self._egpu_icon_gray,
+    }[severity]
+
   def _handle_egpu_click(self, mouse_pos) -> bool:
     if not rl.check_collision_point_rec(mouse_pos, self._egpu_metric_rect):
       return False
+
+    if ui_state.jetlink_view is not None:
+      gui_app.push_widget(ConfirmDialog(self._egpu_detail, tr("OK"), cancel_text=""))
+      return True
 
     if ui_state.started:
       gui_app.push_widget(ConfirmDialog(f"{self._egpu_detail}\neGPU · OFFROAD · {tr('REMOVE')}", tr("OK"), cancel_text=""))

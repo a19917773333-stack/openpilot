@@ -1,11 +1,20 @@
 """Read-only eGPU status model and the small left-side HUD panel."""
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import pyray as rl
 
 from openpilot.common.hardware.usb import CHESTNUT_USB_IDS
+
+# The owner keeps what the phone said at hello and the cable's negotiated
+# speed here; the bottom strip reads them, never the link itself.
+JETLINK_STATUS_RECORD = Path('/dev/shm/jetlink/status.json')
+JETLINK_SERVER_RECORD = Path('/dev/shm/jetlink/server.json')
+JETLINK_RECORD_PERIOD = 1.0
 
 
 @dataclass(frozen=True)
@@ -37,6 +46,153 @@ class EgpuSidebarStatus:
   value: str
   severity: str
   detail: str
+
+
+@dataclass(frozen=True)
+class JetlinkGpuStatus:
+  """The accelerator tile while a phone, not a Chestnut, runs the model."""
+  value: str
+  severity: str
+  detail: str
+
+
+def build_jetlink_gpu_status(*, state: str, present: bool, progress: dict | None = None,
+                             frame_ms: float = 0.0, model: str = "") -> JetlinkGpuStatus:
+  """Map jetlink's accelerator state to the sidebar's GPU tile.
+
+  `state` is the ChestnutState name the UI already derives from
+  jetlink.openpilot.status.Status.icon, so the tile and the chestnut icon agree.
+  The phone is this device's GPU: the tile appears as soon as the link is
+  enabled, gray when nothing is attached, green only once frames come back.
+  """
+  if state == 'failed':
+    return JetlinkGpuStatus('ERR', 'danger', '手机大模型加载或运行失败，已回退小模型')
+  if state == 'disconnected' or (not present and state != 'loading'):
+    return JetlinkGpuStatus('OFFLINE', 'disabled', '未检测到手机（USB 未连接）')
+  if state == 'uncompiled':
+    return JetlinkGpuStatus('NO MODEL', 'warning', '手机大模型尚未就绪')
+  if state == 'loading':
+    frac = float((progress or {}).get('frac') or 0.0)
+    stage = str((progress or {}).get('stage') or '')
+    if stage == 'build' and 0.0 < frac < 1.0:
+      return JetlinkGpuStatus(f'LOAD {int(round(frac * 100))}%', 'progress', '手机正在编译大模型')
+    return JetlinkGpuStatus('WAIT', 'progress', '手机已连接，正在加入大模型')
+  if state in ('active', 'ready', 'waiting'):
+    detail = '手机大模型运行中' if state == 'active' else '手机大模型已就绪，等待可切换的时机'
+    if state == 'active' and frame_ms > 0:
+      detail += f' · {frame_ms:.0f} ms/帧'
+    if model:
+      detail += f' · {model}'
+    return JetlinkGpuStatus('ACTIVE' if state == 'active' else 'READY', 'good', detail)
+  return JetlinkGpuStatus('WAIT', 'warning', '等待手机')
+
+
+def jetlink_gpu_icon_severity(*, state: str, present: bool) -> str:
+  """The onroad GPU icon's colour: green only while the phone drives."""
+  if not present:
+    return 'disabled'
+  if state == 'failed':
+    return 'danger'
+  if state == 'active':
+    return 'good'
+  return 'warning'
+
+
+@dataclass(frozen=True)
+class JetlinkHardware:
+  device: str = ''
+  backend: str = ''
+  usb_speed: str = ''
+
+
+def _short_device(device: str) -> str:
+  # "htp-whole-SM8750" is the NPU's name for the phone; the model is the part
+  # a driver can tell apart
+  return device.rsplit('-', 1)[-1] if device else ''
+
+
+def _short_usb_speed(speed: str) -> str:
+  return {'super-speed': 'USB5', 'high-speed': 'USB2', 'full-speed': 'USB1', 'low-speed': 'USB1'}.get(speed, '')
+
+
+_hardware_cache: tuple[float, JetlinkHardware] = (0.0, JetlinkHardware())
+_hardware_loaded = False
+
+
+def read_jetlink_hardware(now: float | None = None, period: float = JETLINK_RECORD_PERIOD) -> JetlinkHardware:
+  """The phone's own name and the cable speed, from the owner's records.
+
+  The bottom strip draws at 60 Hz; these are two small files rewritten on a
+  state change, so they are read at most once a second. A missing or
+  half-written record keeps the last answer rather than blanking the line.
+  """
+  global _hardware_cache, _hardware_loaded
+  at, cached = _hardware_cache
+  now = time.monotonic() if now is None else now
+  if _hardware_loaded and now - at < period:
+    return cached
+
+  device, backend = cached.device, cached.backend
+  speed = cached.usb_speed
+  try:
+    server = json.loads(JETLINK_SERVER_RECORD.read_text())
+    device = _short_device(str(server.get('device') or ''))
+    backend = str(server.get('backend') or '').upper()
+  except Exception:
+    pass
+  try:
+    record = json.loads(JETLINK_STATUS_RECORD.read_text())
+    speed = _short_usb_speed(str(record.get('speed') or ''))
+  except Exception:
+    pass
+
+  cached = JetlinkHardware(device, backend, speed)
+  _hardware_cache = (now, cached)
+  _hardware_loaded = True
+  return cached
+
+
+@dataclass(frozen=True)
+class JetlinkCompactStatus:
+  visible: bool
+  text: str
+  severity: str
+
+
+def build_compact_jetlink_status(*, state: str, present: bool, progress: dict | None = None,
+                                 model_fps: float = 0.0, frame_ms: float = 0.0,
+                                 device: str = "", backend: str = "",
+                                 usb_speed: str = "") -> JetlinkCompactStatus:
+  """The bottom strip's JetLink line, worded like the eGPU one beside it.
+
+  `state` is the ChestnutState name the UI derives from jetlink's own status,
+  so a phone and a Chestnut are described by the same vocabulary.
+  """
+  if not present:
+    return JetlinkCompactStatus(False, '', 'disabled')
+  if state == 'failed':
+    return JetlinkCompactStatus(True, 'JetLink: ERR', 'danger')
+  if state == 'uncompiled':
+    return JetlinkCompactStatus(True, 'JetLink: NO MODEL', 'warning')
+  if state == 'loading':
+    stage = str((progress or {}).get('stage') or '')
+    frac = float((progress or {}).get('frac') or 0.0)
+    if 0.0 < frac < 1.0 and stage == 'build':
+      return JetlinkCompactStatus(True, f'JetLink: LOAD {int(round(frac * 100))}%', 'progress')
+    if 0.0 < frac < 1.0 and stage == 'upload':
+      return JetlinkCompactStatus(True, f'JetLink: UPLOAD {int(round(frac * 100))}%', 'progress')
+    return JetlinkCompactStatus(True, 'JetLink: JOIN', 'progress')
+  if state in ('ready', 'waiting'):
+    return JetlinkCompactStatus(True, 'JetLink: READY', 'good')
+  if state == 'active':
+    parts = ['JetLink:']
+    if model_fps > 0:
+      parts.append(f'{model_fps:.1f}FPS')
+    if frame_ms > 0:
+      parts.append(f'{frame_ms:.0f}ms')
+    parts.extend(extra for extra in (usb_speed, device, backend) if extra)
+    return JetlinkCompactStatus(True, ' '.join(parts), 'good')
+  return JetlinkCompactStatus(True, 'JetLink: WAIT', 'progress')
 
 
 def build_egpu_sidebar_status(*, present: bool, compiled: bool, link_state: str | None,

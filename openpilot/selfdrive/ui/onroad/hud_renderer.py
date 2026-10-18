@@ -2,7 +2,7 @@ import pyray as rl
 from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
-from openpilot.selfdrive.ui.egpu_status import egpu_icon_visible, resolve_egpu_connection
+from openpilot.selfdrive.ui.egpu_status import jetlink_gpu_icon_severity, resolve_egpu_connection
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -74,6 +74,8 @@ class HudRenderer(Widget):
     self._exp_button: ExpButton = ExpButton(UI_CONFIG.button_size, UI_CONFIG.wheel_icon_size)
     self._egpu_icon_green = gui_app.texture("icons_mici/egpu_green.png", 120, 88)
     self._egpu_icon_orange = gui_app.texture("icons_mici/egpu_orange.png", 120, 88)
+    self._egpu_icon_gray = gui_app.texture("icons_mici/egpu_gray.png", 120, 88)
+    self._egpu_icon_crossed = gui_app.texture("icons_mici/egpu_crossed.png", 120, 104)
 
   def _update_state(self) -> None:
     """Update HUD state based on car state and controls state."""
@@ -126,15 +128,43 @@ class HudRenderer(Widget):
     self._exp_button.render(rl.Rectangle(button_x, button_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
 
   def _draw_egpu_icon(self, rect: rl.Rectangle) -> None:
-    if not egpu_icon_visible(connected=resolve_egpu_connection(ui_state.sm["deviceState"])):
-      return
-    icon = self._egpu_icon_green if ui_state.usbgpu_active is True and not ui_state.big_model_failed else self._egpu_icon_orange
+    label = ""
+    if resolve_egpu_connection(ui_state.sm["deviceState"]):
+      icon = (self._egpu_icon_green if ui_state.usbgpu_active is True and not ui_state.big_model_failed
+              else self._egpu_icon_orange)
+    else:
+      # The phone is this port's other accelerator: the same GPU icon, green
+      # only while its big model is the one publishing frames.
+      view = ui_state.jetlink_view
+      if view is None:
+        return
+      severity = jetlink_gpu_icon_severity(state=ui_state.chestnut_state.value, present=bool(view.present))
+      icon = {
+        "good": self._egpu_icon_green,
+        "warning": self._egpu_icon_orange,
+        "danger": self._egpu_icon_crossed,
+        "disabled": self._egpu_icon_gray,
+      }[severity]
+      label = "JetLink"
+    icon_pos = rl.Vector2(rect.x + rect.width - UI_CONFIG.border_size - icon.width,
+                          rect.y + rect.height - UI_CONFIG.border_size - icon.height)
     rl.draw_texture_ex(
       icon,
-      rl.Vector2(rect.x + rect.width - UI_CONFIG.border_size - icon.width,
-                 rect.y + rect.height - UI_CONFIG.border_size - icon.height),
+      icon_pos,
       0.0, 1.0, rl.WHITE,
     )
+    if label:
+      self._draw_icon_label(label, icon_pos, icon.width)
+
+  def _draw_icon_label(self, text: str, icon_pos: rl.Vector2, icon_w: float) -> None:
+    """The accelerator's name, centred over its icon on the camera image."""
+    size = 34
+    width = measure_text_cached(self._font_semi_bold, text, size).x
+    x = icon_pos.x + (icon_w - width) / 2
+    y = icon_pos.y - size - 6
+    # a shadow, because the bottom of the frame is not always dark
+    rl.draw_text_ex(self._font_semi_bold, text, rl.Vector2(x + 2, y + 2), size, 0, rl.Color(0, 0, 0, 160))
+    rl.draw_text_ex(self._font_semi_bold, text, rl.Vector2(x, y), size, 0, rl.WHITE)
 
   def user_interacting(self) -> bool:
     return self._exp_button.is_pressed

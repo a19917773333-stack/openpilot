@@ -2,9 +2,12 @@ from openpilot.selfdrive.ui.egpu_status import (
   build_egpu_sidebar_status,
   build_egpu_status,
   build_compact_egpu_status,
+  build_compact_jetlink_status,
+  build_jetlink_gpu_status,
   classify_egpu_link_state,
   egpu_icon_visible,
   egpu_panel_style,
+  jetlink_gpu_icon_severity,
   resolve_egpu_connection,
 )
 
@@ -25,6 +28,95 @@ def test_physical_disconnect_immediately_clears_egpu_connection():
 def test_connected_egpu_icon_stays_visible_onroad():
   assert egpu_icon_visible(connected=True)
   assert not egpu_icon_visible(connected=False)
+
+
+def test_jetlink_gpu_tile_follows_the_phone_accelerator():
+  offline = build_jetlink_gpu_status(state="disconnected", present=False)
+  assert (offline.value, offline.severity) == ("OFFLINE", "disabled")
+
+  waiting = build_jetlink_gpu_status(state="loading", present=True)
+  assert (waiting.value, waiting.severity) == ("WAIT", "progress")
+
+  building = build_jetlink_gpu_status(state="loading", present=True,
+                                      progress={"stage": "build", "frac": 0.42})
+  assert (building.value, building.severity) == ("LOAD 42%", "progress")
+
+  ready = build_jetlink_gpu_status(state="ready", present=True)
+  assert (ready.value, ready.severity) == ("READY", "good")
+
+  active = build_jetlink_gpu_status(state="active", present=True, frame_ms=21.4, model="Cinque Terre")
+  assert (active.value, active.severity) == ("ACTIVE", "good")
+  assert "21 ms/帧" in active.detail
+  assert "Cinque Terre" in active.detail
+
+  failed = build_jetlink_gpu_status(state="failed", present=True)
+  assert (failed.value, failed.severity) == ("ERR", "danger")
+
+
+def test_jetlink_gpu_icon_is_green_only_while_the_phone_drives():
+  assert jetlink_gpu_icon_severity(state="active", present=True) == "good"
+  assert jetlink_gpu_icon_severity(state="ready", present=True) == "warning"
+  assert jetlink_gpu_icon_severity(state="failed", present=True) == "danger"
+  assert jetlink_gpu_icon_severity(state="active", present=False) == "disabled"
+
+
+def test_jetlink_bottom_line_mirrors_the_gpu_line():
+  assert not build_compact_jetlink_status(state="disconnected", present=False).visible
+
+  loading = build_compact_jetlink_status(state="loading", present=True,
+                                         progress={"stage": "build", "frac": 0.37})
+  assert (loading.text, loading.severity) == ("JetLink: LOAD 37%", "progress")
+
+  uploading = build_compact_jetlink_status(state="loading", present=True,
+                                           progress={"stage": "upload", "frac": 0.5})
+  assert uploading.text == "JetLink: UPLOAD 50%"
+
+  joining = build_compact_jetlink_status(state="loading", present=True)
+  assert joining.text == "JetLink: JOIN"
+
+  ready = build_compact_jetlink_status(state="ready", present=True)
+  assert (ready.text, ready.severity) == ("JetLink: READY", "good")
+
+  active = build_compact_jetlink_status(
+    state="active", present=True, model_fps=20.0, frame_ms=24.6,
+    device="SM8750", backend="ORT", usb_speed="USB5",
+  )
+  assert active.text == "JetLink: 20.0FPS 25ms USB5 SM8750 ORT"
+  assert active.severity == "good"
+
+  failed = build_compact_jetlink_status(state="failed", present=True)
+  assert (failed.text, failed.severity) == ("JetLink: ERR", "danger")
+
+
+def test_jetlink_hardware_record_is_shortened_and_cached():
+  import json
+  import tempfile
+  from pathlib import Path
+  import openpilot.selfdrive.ui.egpu_status as egpu_status
+
+  with tempfile.TemporaryDirectory() as tmp:
+    server = Path(tmp) / "server.json"
+    record = Path(tmp) / "status.json"
+    server.write_text(json.dumps({"device": "htp-whole-SM8750", "backend": "ort"}))
+    record.write_text(json.dumps({"speed": "super-speed"}))
+
+    saved = (egpu_status.JETLINK_SERVER_RECORD, egpu_status.JETLINK_STATUS_RECORD,
+             egpu_status._hardware_cache, egpu_status._hardware_loaded)
+    try:
+      egpu_status.JETLINK_SERVER_RECORD = server
+      egpu_status.JETLINK_STATUS_RECORD = record
+      egpu_status._hardware_cache = (0.0, egpu_status.JetlinkHardware())
+      egpu_status._hardware_loaded = False
+
+      hardware = egpu_status.read_jetlink_hardware(now=100.0)
+      assert (hardware.device, hardware.backend, hardware.usb_speed) == ("SM8750", "ORT", "USB5")
+
+      server.write_text(json.dumps({"device": "htp-whole-SM8650", "backend": "ort"}))
+      assert egpu_status.read_jetlink_hardware(now=100.5).device == "SM8750"
+      assert egpu_status.read_jetlink_hardware(now=102.0).device == "SM8650"
+    finally:
+      (egpu_status.JETLINK_SERVER_RECORD, egpu_status.JETLINK_STATUS_RECORD,
+       egpu_status._hardware_cache, egpu_status._hardware_loaded) = saved
 
 
 def test_egpu_panel_is_at_least_twice_as_large_with_transparent_background():

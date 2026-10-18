@@ -43,6 +43,16 @@ def test_bottom_status_puts_compact_gpu_text_before_device_resources():
   assert all(item.color == rl.WHITE for item in elements)
 
 
+def test_bottom_status_accelerator_text_keeps_its_own_colour():
+  device_state = SimpleNamespace(cpuTempC=[63.7], memoryUsagePercent=38, freeSpacePercent=31.8)
+
+  elements = build_bottom_status_elements(device_state, "JetLink: 20.0FPS 25ms USB5 SM8750 ORT", rl.GREEN)
+
+  assert elements[0].value.startswith("JetLink: 20.0FPS")
+  assert elements[0].color == rl.GREEN
+  assert [item.label for item in elements[1:]] == ["CPU", "MEM", "DSK"]
+
+
 def test_gpu_and_device_text_use_identical_font_size_and_color(monkeypatch):
   from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui import DeveloperUiRenderer
   import openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui.elements as element_module

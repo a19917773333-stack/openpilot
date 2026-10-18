@@ -55,11 +55,12 @@ def build_device_resource_elements(device_state) -> list[UiElement]:
   ]
 
 
-def build_bottom_status_elements(device_state, egpu_text: str = "") -> list[UiElement]:
+def build_bottom_status_elements(device_state, accelerator_text: str = "",
+                                 accelerator_color: rl.Color = BOTTOM_STATUS_COLOR) -> list[UiElement]:
   resources = build_device_resource_elements(device_state)
-  if not egpu_text:
+  if not accelerator_text:
     return resources
-  return [UiElement(egpu_text, "", "", BOTTOM_STATUS_COLOR), *resources]
+  return [UiElement(accelerator_text, "", "", accelerator_color), *resources]
 
 
 class LeadInfoElement:

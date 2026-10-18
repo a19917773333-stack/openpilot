@@ -8,7 +8,9 @@ from enum import IntEnum
 
 import pyray as rl
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.selfdrive.ui.egpu_status import build_compact_egpu_status, resolve_egpu_connection
+from openpilot.selfdrive.ui.egpu_status import (
+  build_compact_egpu_status, build_compact_jetlink_status, read_jetlink_hardware, resolve_egpu_connection,
+)
 from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui.elements import (
   UiElement, RelDistElement, RelSpeedElement, SteeringAngleElement,
   DesiredLateralAccelElement, ActualLateralAccelElement, DesiredSteeringAngleElement,
@@ -27,6 +29,15 @@ def get_bottom_dev_ui_offset():
   return 0
 
 
+ACCELERATOR_COLORS = {
+  "good": BOTTOM_STATUS_COLOR,
+  "warning": rl.Color(218, 202, 37, 255),
+  "danger": rl.Color(201, 34, 49, 255),
+  "progress": rl.Color(0, 134, 233, 255),
+  "disabled": rl.Color(128, 128, 128, 255),
+}
+
+
 class DeveloperUiState(IntEnum):
   OFF = 0
   BOTTOM = 1
@@ -40,6 +51,8 @@ class DeveloperUiRenderer(Widget):
     self._font_bold: rl.Font = gui_app.font(FontWeight.BOLD)
     self._font_semi_bold: rl.Font = gui_app.font(FontWeight.SEMI_BOLD)
     self.dev_ui_mode = DeveloperUiState.OFF
+    self._model_fps: float = 0.0
+    self._last_model_ts: int = 0
 
     self.rel_dist_elem = RelDistElement()
     self.rel_speed_elem = RelSpeedElement()
@@ -58,6 +71,18 @@ class DeveloperUiRenderer(Widget):
 
   def _update_state(self) -> None:
     self.dev_ui_mode = ui_state.developer_ui
+
+  def _update_model_fps(self, sm) -> None:
+    """Frame rate from the camera stamps modelV2 carries, smoothed for the strip."""
+    if not sm.updated['modelV2']:
+      return
+    ts = int(sm['modelV2'].timestampEof)
+    if self._last_model_ts and ts > self._last_model_ts:
+      dt = (ts - self._last_model_ts) * 1e-9
+      if 0.005 < dt < 1.0:
+        fps = 1.0 / dt
+        self._model_fps = fps if self._model_fps <= 0.0 else self._model_fps * 0.8 + fps * 0.2
+    self._last_model_ts = ts
 
   def _render(self, rect: rl.Rectangle) -> None:
     if self.dev_ui_mode == DeveloperUiState.OFF:
@@ -130,6 +155,7 @@ class DeveloperUiRenderer(Widget):
 
   def _draw_bottom_dev_ui(self, rect: rl.Rectangle) -> None:
     sm = ui_state.sm
+    self._update_model_fps(sm)
     bar_height = 61
     y = int(rect.y + rect.height - bar_height)
 
@@ -158,7 +184,26 @@ class DeveloperUiRenderer(Widget):
       memory_used_mb=int(telemetry.memoryUsedMb), memory_total_mb=int(telemetry.memoryTotalMb),
       gpu_usage_percent=int(telemetry.gpuUsagePercent),
     )
-    elements = build_bottom_status_elements(sm['deviceState'], egpu.text if egpu.visible else "")
+
+    view = ui_state.jetlink_view
+    if view is not None:
+      hardware = read_jetlink_hardware()
+      jetlink = build_compact_jetlink_status(
+        state=ui_state.chestnut_state.value, present=bool(view.present), progress=view.progress,
+        model_fps=self._model_fps,
+        frame_ms=float(sm['modelV2'].modelExecutionTime) * 1000.0 if model_big else 0.0,
+        device=hardware.device, backend=hardware.backend, usb_speed=hardware.usb_speed,
+      )
+    else:
+      jetlink = None
+
+    if egpu.visible:
+      accelerator_text, accelerator_color = egpu.text, BOTTOM_STATUS_COLOR
+    elif jetlink is not None and jetlink.visible:
+      accelerator_text, accelerator_color = jetlink.text, ACCELERATOR_COLORS[jetlink.severity]
+    else:
+      accelerator_text, accelerator_color = "", BOTTOM_STATUS_COLOR
+    elements = build_bottom_status_elements(sm['deviceState'], accelerator_text, accelerator_color)
 
     if not elements:
       return
