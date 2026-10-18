@@ -66,7 +66,7 @@ GUIDANCE_KEYS = frozenset((
   "roadClass", "roadType", "advisorySpeedMps", "observedAtMs",
 ))
 LANES_KEYS = frozenset(("observedAtMs", "items"))
-LANE_ITEM_KEYS = frozenset(("index", "allowedActions", "recommendedActions", "recommended"))
+LANE_ITEM_KEYS = frozenset(("index", "allowedActions", "recommendedActions", "recommended", "routeAvoid"))
 
 
 class NavAssistProtocolError(ValueError):
@@ -81,6 +81,7 @@ class LaneGuidance:
   allowed_actions: int
   recommended_actions: int
   recommended: bool
+  route_avoid: bool = False
 
 
 @dataclass(frozen=True)
@@ -293,6 +294,7 @@ def parse_snapshot(body: bytes) -> NavAssistSnapshot:
         _required(lane, "recommendedActions"), f"lanes.items[{position}].recommendedActions",
       ),
       recommended=_boolean(lane, "recommended"),
+      route_avoid=_optional_boolean(lane, "routeAvoid"),
     ))
 
   advisory_speed = guidance.get("advisorySpeedMps")

@@ -147,6 +147,7 @@
           "maxItems": 16
         },
         "recommended": { "type": "boolean" },
+        "routeAvoid": { "type": "boolean" },
         "recommendedActions": {
           "type": "array",
           "items": { "$ref": "#/$defs/laneAction" },
