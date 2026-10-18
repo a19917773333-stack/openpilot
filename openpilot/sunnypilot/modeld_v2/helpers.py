@@ -117,14 +117,26 @@ def _extended(path: str, extend) -> tuple[dict, dict, str]:
   return parts | added, extras, _parts_digest(added) if added else ""
 
 
-def load_model(path: str, device_map: dict | None = None, verify: bool = True, cache: bool = True, extend=None) -> dict:
+def load_model(path: str, device_map: dict | None = None, verify: bool = True, cache: bool = True, extend=None,
+               progress_callback=None) -> dict:
+  def report(progress: float) -> None:
+    if progress_callback is not None:
+      progress_callback(min(1.0, max(0.0, progress)))
+
   parts, extras, extra = _extended(path, extend)
-  if cache and (cached := _read_cache(path, parts, device_map, extra)) is not None:
+  report(0.05)
+  if cache and (cached := _read_cache(path, parts, device_map, extra,
+                                      progress_callback=lambda value: report(0.05 + 0.9 * value))) is not None:
+    report(1.0)
     return extras | cached
   shared: dict = {}
-  jits = {key: PlainJit(header, blob, device_map, verify, shared) for key, (header, blob) in parts.items()}
+  jits: dict = {}
+  for index, (key, (header, blob)) in enumerate(parts.items()):
+    jits[key] = PlainJit(header, blob, device_map, verify, shared)
+    report(0.05 + 0.85 * (index + 1) / max(1, len(parts)))
   if cache:
     _write_cache(path, jits, device_map, extra)
+  report(1.0)
   return extras | jits
 
 
@@ -168,13 +180,17 @@ def cache_is_fresh(path: str, device_map: dict | None = None) -> bool: # entry p
     return False
 
 
-def _read_cache(path: str, parts: dict, device_map: dict | None, extra: str = "") -> dict | None:
+def _read_cache(path: str, parts: dict, device_map: dict | None, extra: str = "", progress_callback=None) -> dict | None:
   try:
     with open(f"{path}.cache", "rb") as file:
       if not _cache_header_matches(file, path, device_map, extra):
         return None
       shared: dict = {}
-      buffers = {repr(key): _allocate_buffers(header, blob, device_map, shared) for key, (header, blob) in parts.items()}
+      buffers: dict = {}
+      for index, (key, (header, blob)) in enumerate(parts.items()):
+        buffers[repr(key)] = _allocate_buffers(header, blob, device_map, shared)
+        if progress_callback is not None:
+          progress_callback((index + 1) / max(1, len(parts)))
       return type("_Unpickler", (pickle.Unpickler,), {"persistent_load": lambda self, pid: buffers[pid[0]][pid[1]]})(file).load()
   except Exception:
     return None

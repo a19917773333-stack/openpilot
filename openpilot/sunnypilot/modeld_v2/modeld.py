@@ -95,8 +95,9 @@ class ModelState(ModelStateBase):
   inputs: dict[str, np.ndarray]
   prev_desire: np.ndarray
 
-  def __init__(self, cam_w: int, cam_h: int, chestnut: bool = False):
+  def __init__(self, cam_w: int, cam_h: int, chestnut: bool = False, loading_progress_callback=None):
     ModelStateBase.__init__(self)
+    self._loading_progress_callback = loading_progress_callback
 
     env_pkl = os.environ.get('COMBINED_MODEL_PKL')
     if env_pkl and os.path.exists(env_pkl):
@@ -117,7 +118,7 @@ class ModelState(ModelStateBase):
       default_pkl = modeld_pkl_path(chestnut=False)
       pkl_path = str(default_pkl) if _pkl_exists(default_pkl) else None
     assert pkl_path is not None, f"No driving pkl found for {'chestnut' if chestnut else 'small model'} — all models must be compiled with compile_modeld.py"
-    self._init_combined(pkl_path, cam_w, cam_h, model_bundle)
+    self._init_combined(pkl_path, cam_w, cam_h, model_bundle, loading_progress_callback)
     if not chestnut:
       try:
         self.warmup()
@@ -132,17 +133,25 @@ class ModelState(ModelStateBase):
         self._init_combined(default_pkl, cam_w, cam_h, None)
         self.warmup()
 
-  def _init_combined(self, pkl_path, cam_w, cam_h, bundle):
+  def _init_combined(self, pkl_path, cam_w, cam_h, bundle, loading_progress_callback=None):
     cloudlog.warning(f"loading combined pkl: {pkl_path}")
+
+    def report_load_progress(value: float) -> None:
+      if loading_progress_callback is not None:
+        loading_progress_callback(5 + int(value * 70))
+
     with open_file_chunked(pkl_path) as source:
       plain = source.read(len(MAGIC)) == MAGIC
     if plain:
-      jits = load_model(pkl_path, extend=fused_with_warp(cam_w, cam_h, self.chestnut))
+      jits = load_model(pkl_path, extend=fused_with_warp(cam_w, cam_h, self.chestnut),
+                        progress_callback=report_load_progress)
     else:
       # Only the bundled default uses the runtime's OOB format; selector models are plain.
       assert str(pkl_path) == str(modeld_pkl_path(chestnut=False)) and not self.chestnut
       jits = load_stock_oob(pkl_path)
       jits['run'].captured._linear = lower_and_compile(jits['run'].captured._linear)
+    if loading_progress_callback is not None:
+      loading_progress_callback(80)
 
     metadata = jits['metadata']
     self.WARP_DEV = metadata.get('warp_dev', 'QCOM') if COMMA_HARDWARE else 'CPU'
@@ -171,12 +180,16 @@ class ModelState(ModelStateBase):
 
     self.parser = Parser()
     self.prev_desire = np.zeros(self.constants.DESIRE_LEN, dtype=np.float32)
+    if loading_progress_callback is not None:
+      loading_progress_callback(90)
 
   def warmup(self) -> None:
     dummy_frames, transforms, dummy_inputs = self.adapter.get_dummy_inputs()
     self.run(dummy_frames, transforms, dummy_inputs)
     self.adapter.reset_warmup_buffers()
     self.prev_desire[:] = 0
+    if self.chestnut and self._loading_progress_callback is not None:
+      self._loading_progress_callback(95)
 
   @property
   def mlsim(self) -> bool:
@@ -296,11 +309,20 @@ def main(demo=False):
 
   params = Params()
   params.put_bool("ChestnutLoading", CHESTNUT)
+  params.put("ChestnutLoadingProgress", 1 if CHESTNUT else 0, block=True)
   params.remove("ChestnutActive")
   if not CHESTNUT:
     jetlink_adapter.prepare()
 
   config_realtime_process(7, 54)
+
+  last_loading_progress = -1
+  def update_loading_progress(progress: int) -> None:
+    nonlocal last_loading_progress
+    progress = max(0, min(100, int(progress)))
+    if progress != last_loading_progress:
+      params.put("ChestnutLoadingProgress", progress, block=True)
+      last_loading_progress = progress
 
   # visionipc clients
   while True:
@@ -334,7 +356,8 @@ def main(demo=False):
     def load_big():
       nonlocal big_model
       try:
-        m = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=True)
+        m = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=True,
+                       loading_progress_callback=update_loading_progress)
         m.warmup()
         big_model = m
       except Exception:
@@ -344,13 +367,14 @@ def main(demo=False):
     loader.join(BIG_MODEL_TIMEOUT)
     model = big_model
     params.put_bool("ChestnutActive", model is not None)
+    update_loading_progress(100 if model is not None else 0)
 
   small_model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=False) if model is None or CHESTNUT else None
   if model is None:
     model = small_model
   if (joined := jetlink_adapter.attach(small_model, vipc_client_main.width, vipc_client_main.height)) is not None:
     model = joined
-  params.put_bool("ChestnutLoading", False)
+  params.put_bool("ChestnutLoading", False, block=True)
   assert model is not None
   cloudlog.warning(f"models loaded in {time.monotonic() - st:.1f}s, modeld starting")
 
