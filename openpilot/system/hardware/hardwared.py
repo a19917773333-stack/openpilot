@@ -25,6 +25,7 @@ from openpilot.common.hardware.usb import CHESTNUT_FW_VERSION, chestnut_official
 from openpilot.common.linux import LinuxSystemStats
 from openpilot.system.loggerd.config import get_available_percent
 from openpilot.common.swaglog import cloudlog
+from openpilot.sunnypilot import jetlink_adapter
 from openpilot.sunnypilot.hardware.profile import (
   allows_automatic_power_down, get_hardware_profile, power_down_requested,
 )
@@ -267,6 +268,7 @@ def hardware_thread(end_event, hw_queue) -> None:
   chestnut = Chestnut()
   chestnut_ejector = ChestnutEjector(params)
   big_model_available = chestnut_model_ready(params)
+  accelerator_off_ts = None
 
   while not end_event.is_set():
     sm.update(PANDA_STATES_TIMEOUT)
@@ -330,6 +332,9 @@ def hardware_thread(end_event, hw_queue) -> None:
     chestnut_ejector.update(started_ts is None, last_hw_state.usb_state)
     chestnut.update(started_ts is None, last_hw_state.usb_state)
     set_offroad_alert_if_changed("Offroad_ChestnutBranch", msg.deviceState.chestnutPresent and not big_model_available)
+    accelerator_error = jetlink_adapter.reason()
+    set_offroad_alert_if_changed("Offroad_AcceleratorUnavailable", accelerator_error is not None,
+                                 extra_text=accelerator_error)
 
     # this subset is only used for offroad
     temp_sources = [
@@ -490,10 +495,16 @@ def hardware_thread(end_event, hw_queue) -> None:
     # ForcePowerDown and the settings UI's DoShutdown path remain available.
     automatic_power_down = allows_automatic_power_down(hardware_profile) and \
                            power_monitor.should_shutdown(onroad_conditions["ignition"], in_car, off_ts, started_seen)
-    if power_down_requested(automatic=automatic_power_down,
-                            manual=params.get_bool("ForcePowerDown"), profile=hardware_profile):
-      cloudlog.warning(f"shutting device down, offroad since {off_ts}")
-      params.put_bool("DoShutdown", True, block=True)
+    shutdown_requested = power_down_requested(
+      automatic=automatic_power_down, manual=params.get_bool("ForcePowerDown"), profile=hardware_profile,
+    )
+    if accelerator_off_ts is not None or shutdown_requested:
+      if accelerator_off_ts is None:
+        cloudlog.warning(f"shutting device down, offroad since {off_ts}")
+        jetlink_adapter.request_shutdown(f"comma shutting down, offroad since {off_ts}")
+        accelerator_off_ts = time.monotonic()
+      if not jetlink_adapter.shutdown_pending() or time.monotonic() - accelerator_off_ts >= 25.0:
+        params.put_bool("DoShutdown", True, block=True)
 
     msg.deviceState.started = started_ts is not None and not offroad_mode
     msg.deviceState.startedMonoTime = int(1e9*(started_ts or 0))

@@ -35,6 +35,7 @@ class ChestnutState(Enum):
   LOADING = "loading"
   ACTIVE = "active"
   FAILED = "failed"
+  WAITING = "waiting"
 
 
 class UIState(UIStateSP):
@@ -250,6 +251,10 @@ class UIState(UIStateSP):
       self._started_prev = self.started
 
   def _update_chestnut_state(self) -> None:
+    if (view := self.jetlink_view) is not None:
+      self.chestnut_state = self._jetlink_state(view)
+      return
+
     detected = self.sm["deviceState"].chestnutPresent
     if not self.started:
       self.chestnut_present = detected

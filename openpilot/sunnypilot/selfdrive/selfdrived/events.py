@@ -270,7 +270,23 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 0.1),
   },
 
+  EventNameSP.bigModelAvailable: {
+    ET.PERMANENT: Alert(
+      "Big Model Ready",
+      "Re-engage to switch",
+      AlertStatus.normal, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .2),
+  },
+
   EventNameSP.bigModelReady: {
     ET.PERMANENT: big_model_ready_alert,
+  },
+
+  EventNameSP.bigModelLinkLost: {
+    ET.WARNING: Alert(
+      "Big Model Lost",
+      "Using small model",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.MID, VisualAlert.steerRequired, AudibleAlert.warningSoft, .2),
   },
 }

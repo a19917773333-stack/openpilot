@@ -42,6 +42,8 @@ from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_drivi
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.helpers import MODELS_DIR, chestnut_present, chestnut_compiled, modeld_pkl_path, load_oob
 from openpilot.system.hardware.chestnut.status import read_runtime_asm_telemetry
+
+from openpilot.sunnypilot import jetlink_adapter
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_change_blocker import (
@@ -268,6 +270,8 @@ def main(demo=False):
   params = Params()
   params.put_bool("ChestnutLoading", CHESTNUT)
   params.remove("ChestnutActive")
+  if not CHESTNUT:
+    jetlink_adapter.prepare()
 
   config_realtime_process(7, 54)
 
@@ -316,6 +320,8 @@ def main(demo=False):
   small_model = ModelState(vipc_client_main.width, vipc_client_main.height, False) if model is None or CHESTNUT else None
   if model is None:
     model = small_model
+  if (joined := jetlink_adapter.attach(small_model, vipc_client_main.width, vipc_client_main.height)) is not None:
+    model = joined
   assert model is not None
   params.put_bool("ChestnutLoading", False)
   cloudlog.warning(f"models loaded in {time.monotonic() - st:.1f}s, modeld starting")
@@ -441,6 +447,9 @@ def main(demo=False):
       'action_t': np.array([lat_action_t, long_action_t], dtype=np.float32),
     }
 
+    model.in_control = jetlink_adapter.in_control(sm)
+    model.frame_drop_ratio = frame_drop_ratio
+    handovers = getattr(model, 'handovers', 0)
     mt1 = time.perf_counter()
     try:
       send_chestnut = (chestnut_state is not None and
@@ -460,6 +469,8 @@ def main(demo=False):
       model_output = None
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
+    if getattr(model, 'handovers', 0) != handovers:
+      run_count = 0
 
     if model_output is not None:
       modelv2_send = messaging.new_message('modelV2')
@@ -478,6 +489,7 @@ def main(demo=False):
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
       r_lane_change_prob = desire_state[log.Desire.laneChangeRight]
       lane_change_prob = l_lane_change_prob + r_lane_change_prob
+      mdv2sp_send.modelDataV2SP.acceleratorState = getattr(model, 'big_model_state', 'none')
       left_edge, right_edge = RELC.update_and_fill(modelv2_send.modelV2, mdv2sp_send.modelDataV2SP, v_ego)
       nav_lane_intent = sm['navLaneIntentSP'] if (
         sm.seen['navLaneIntentSP'] and sm.alive['navLaneIntentSP'] and sm.valid['navLaneIntentSP']

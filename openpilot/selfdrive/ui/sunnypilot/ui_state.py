@@ -10,6 +10,7 @@ from openpilot.cereal import messaging, log, custom
 from opendbc.car.structs import car
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.display import OnroadBrightness
+from openpilot.sunnypilot import jetlink_adapter
 from openpilot.sunnypilot.models.helpers import ACTIVE_BUNDLE_KEYS, get_active_source
 from openpilot.sunnypilot.lane_topology.ui_bridge import LaneTopologyUIBridge
 from openpilot.sunnypilot.sunnylink.sunnylink_state import SunnylinkState
@@ -49,7 +50,7 @@ class UIStateSP:
     self.sm_services_ext = [
       "modelManagerSP", "selfdriveStateSP", "longitudinalPlanSP", "backupManagerSP",
       "gpsLocation", "lateralTorqueParameters", "carStateSP", "liveMapDataSP", "carParamsSP", "lateralDelay",
-      "navAssistStateSP", "laneTopologyStateSP", "navLaneIntentSP"
+      "navAssistStateSP", "laneTopologyStateSP", "navLaneIntentSP", "modelDataV2SP"
     ]
     self.lane_topology_bridge = LaneTopologyUIBridge(frame_divisor=5)
     self.lane_topology = None
@@ -63,6 +64,8 @@ class UIStateSP:
 
     self.active_bundle = None
     self.model_runner_tinygrad: bool = False
+    self.jetlink = None
+    self._accelerator_state_name: str = 'none'
     self.blindspot: bool = False
     self.chevron_metrics = None
     self.custom_interactive_timeout: int = 0
@@ -88,6 +91,7 @@ class UIStateSP:
       self.sunnylink_state.start()
     else:
       self.sunnylink_state.stop()
+    self._accelerator_state_name = str(self.sm['modelDataV2SP'].acceleratorState)
     if self.is_offroad():
       if self.lane_topology is not None:
         self.lane_topology_bridge.reset()
@@ -100,6 +104,17 @@ class UIStateSP:
       self.lane_topology = None
     elif self.sm.updated["modelV2"]:
       self.lane_topology = self.lane_topology_bridge.update(self.sm["modelV2"])
+
+  @property
+  def jetlink_view(self):
+    view = self.jetlink
+    return view if view is not None and (view.enabled or view.present or view.progress is not None) else None
+
+  def _jetlink_state(self, view):
+    from openpilot.selfdrive.ui.ui_state import ChestnutState
+    model_seen = self.sm.recv_frame["modelV2"] > self.started_frame
+    running_big = self.sm.alive["modelV2"] and self.sm["modelV2"].big
+    return ChestnutState(view.icon(self.started, model_seen, running_big, self._accelerator_state_name))
 
   def onroad_brightness_handle_alerts(self, _ui_state, alert):
     if _ui_state.sm.recv_frame["carState"] < _ui_state.started_frame:
@@ -189,6 +204,7 @@ class UIStateSP:
     # A downloaded Chestnut bundle is already compiled even when the optional
     # built-in Default Big artifact is absent from this source deployment.
     self.chestnut_compiled = self.chestnut_compiled or self.model_runner_tinygrad
+    self.jetlink = None if self.sm['deviceState'].chestnutPresent else jetlink_adapter.status()
     self.blindspot = self.params.get_bool("BlindSpot")
     self.chevron_metrics = self.params.get("ChevronInfo")
     self.custom_interactive_timeout = self.params.get("InteractivityTimeout", return_default=True)
