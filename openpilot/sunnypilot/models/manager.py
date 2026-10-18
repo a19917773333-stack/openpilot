@@ -62,8 +62,7 @@ class ModelManagerSP:
     """Mirror download progress to all artifacts sharing the same filename in the selected bundle."""
     if not self.selected_bundle:
       return
-    models = [] if source == "chestnut" and not self.chestnut_present else self.selected_bundle.models
-    for model in models:
+    for model in self.selected_bundle.models:
       artifact = model.artifact
       if artifact is not source_artifact and artifact.fileName == source_artifact.fileName:
         artifact.downloadProgress.status = source_artifact.downloadProgress.status
