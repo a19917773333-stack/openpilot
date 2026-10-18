@@ -9,6 +9,8 @@ REMOTE_BRANCHES = [
   "dev-sp-egpu-nva",
   "dev-sp-egpu-prebuild",
   "navassist-track-p0",
+  "slgame",
+  "dev20261018-slgame-jetlink",
   "dev",
   "master-new",
   "release-tici",
@@ -23,6 +25,8 @@ def test_c3xl_exposes_only_the_maintained_branches() -> None:
     "dev-sp-egpu-nva",
     "dev-sp-egpu-prebuild",
     "navassist-track-p0",
+    "slgame",
+    "dev20261018-slgame-jetlink",
   )
   assert selectable_tici_branches(REMOTE_BRANCHES, HardwareProfile.C3XL) == [
     "dev-sp-egpu",
@@ -30,6 +34,8 @@ def test_c3xl_exposes_only_the_maintained_branches() -> None:
     "dev-sp-egpu-nva",
     "dev-sp-egpu-prebuild",
     "navassist-track-p0",
+    "slgame",
+    "dev20261018-slgame-jetlink",
   ]
 
 

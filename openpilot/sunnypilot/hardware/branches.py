@@ -11,6 +11,8 @@ C3XL_COMPATIBLE_BRANCHES = (
   "dev-sp-egpu-nva",
   "dev-sp-egpu-prebuild",
   "navassist-track-p0",
+  "slgame",
+  "dev20261018-slgame-jetlink",
 )
 
 
