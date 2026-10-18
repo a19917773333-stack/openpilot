@@ -66,6 +66,7 @@ def sp_stats(end_event):
     'MadsUnifiedEngagementMode',
     'ModelManager_ActiveBundle',
     'ModelManager_Favs',
+    'JetlinkLink',
     'EnableSunnylinkUploader',
     'SunnylinkEnabled',
     'InstallDate',
