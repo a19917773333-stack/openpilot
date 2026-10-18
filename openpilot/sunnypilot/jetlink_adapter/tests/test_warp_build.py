@@ -74,6 +74,9 @@ def run_sconscript(camera_configs=CAMERAS, prebuilt: bool = False, arch: str = '
   `jetlink`, else an empty one with the capture in it or not."""
   with (contextlib.nullcontext(root) if root is not None else tempfile.TemporaryDirectory()) as checkout:
     (Path(checkout) / 'openpilot').symlink_to(Path(BASEDIR) / 'openpilot')
+    (Path(checkout) / 'opendbc').symlink_to(Path(BASEDIR) / 'opendbc_repo' / 'opendbc')
+    (Path(checkout) / 'msgq').symlink_to(Path(BASEDIR) / 'msgq_repo' / 'msgq')
+    (Path(checkout) / 'tinygrad').symlink_to(Path(BASEDIR) / 'tinygrad_repo' / 'tinygrad')
     if jetlink is not None:
       (Path(checkout) / 'jetlink_repo').symlink_to(jetlink)
     else:
@@ -206,9 +209,11 @@ class TestTheCommandBuilds(OpenpilotTestCase):
     CPU device, since this runs off the comma."""
     import jetlink
     checkout = Path(jetlink.__file__).resolve().parents[1]
-    # the path the build has, less anywhere this runner finds jetlink
-    base = os.pathsep.join(p for p in sys.path if p and not (Path(p) / 'jetlink').exists())
     with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as out:
+      # Use the temporary checkout's openpilot link, so an installed root-level
+      # jetlink link cannot make filtering its path also hide openpilot.
+      base = os.pathsep.join([root, *(p for p in sys.path if p and Path(p).resolve() != Path(BASEDIR).resolve()
+                                             and not (Path(p) / 'jetlink').exists())])
       [(cmd, env)] = run_sconscript(CAMERAS[:1], jetlink=checkout, pythonpath=base, root=root).values()
       pkl = Path(out) / 'warp.pkl'
       cmd = cmd.removeprefix('-').rsplit(' --output ', 1)[0] + f' --output {pkl}'
