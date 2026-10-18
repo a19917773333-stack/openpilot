@@ -1,27 +1,21 @@
 import argparse
 import os
 import hashlib
-import re
-import subprocess
-
 import requests
+import re
 
 from openpilot.common.basedir import BASEDIR
+from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.sunnypilot import get_file_hash
-from openpilot.selfdrive.modeld.helpers import chestnut_present
-from openpilot.sunnypilot.models.fetcher import ModelFetcher
 from openpilot.sunnypilot.models.model_name import DEFAULT_MODEL, DEFAULT_BIG_MODEL
+from openpilot.sunnypilot.models.fetcher import ModelFetcher
 
 
-def get_default_model(connected: bool | None = None) -> str:
-  """Return the built-in model name without forcing UI callers to probe sysfs."""
-  connected = chestnut_present() if connected is None else connected
-  return DEFAULT_BIG_MODEL if connected else DEFAULT_MODEL
+def get_default_model() -> str:
+  show_big_model = (ui_state.chestnut_present
+                    and (ui_state.chestnut_active or ui_state.chestnut_loading or ui_state.is_offroad()))
 
-
-def get_stock_default_model() -> str:
-  """The Default selection always clears ActiveBundle and uses the stock runner."""
-  return DEFAULT_MODEL
+  return DEFAULT_BIG_MODEL if show_big_model else DEFAULT_MODEL
 
 
 DEFAULT_MODEL_NAME_PATH = os.path.join(BASEDIR, "openpilot", "sunnypilot", "models", "model_name.py")
@@ -31,9 +25,22 @@ SUPERCOMBO_ONNX_PATH = os.path.join(BASEDIR, "openpilot", "selfdrive", "modeld",
 BIG_SUPERCOMBO_ONNX_PATH = os.path.join(BASEDIR, "openpilot", "selfdrive", "modeld", "models", "big_driving_supercombo.onnx")
 
 
+def _read_model_name_fields():
+  with open(DEFAULT_MODEL_NAME_PATH) as f:
+    content = f.read()
+  fields = {}
+  for line in content.splitlines():
+    if "=" in line:
+      key, val = line.split("=", 1)
+      fields[key.strip()] = val.strip().strip('"')
+  return fields
+
+
 def update_model_hash():
+  fields = _read_model_name_fields()
   supercombo_hash = get_file_hash(SUPERCOMBO_ONNX_PATH)
-  combined_hash = hashlib.sha256(supercombo_hash.encode()).hexdigest()
+  fingerprint = f"{supercombo_hash}:{fields.get('DEFAULT_MODEL', '')}:{fields.get('DEFAULT_MODEL_REF', '')}"
+  combined_hash = hashlib.sha256(fingerprint.encode()).hexdigest()
 
   with open(MODEL_HASH_PATH, "w") as f:
     f.write(combined_hash)
@@ -41,10 +48,12 @@ def update_model_hash():
   print(f"Generated and updated new combined model hash to {MODEL_HASH_PATH}")
 
   if os.path.exists(BIG_SUPERCOMBO_ONNX_PATH):
-    relative_path = os.path.relpath(BIG_SUPERCOMBO_ONNX_PATH, os.getcwd())
-    pointer = subprocess.check_output(["git", "show", f"HEAD:{relative_path}"], text=True)
-    oid = next(line.split(":", 1)[1] for line in pointer.splitlines() if line.startswith("oid sha256:"))
-    big_combined_hash = hashlib.sha256(oid.encode()).hexdigest()
+    import subprocess
+    rel = os.path.relpath(BIG_SUPERCOMBO_ONNX_PATH, os.getcwd())
+    pointer = subprocess.check_output(["git", "show", f"HEAD:{rel}"], text=True)
+    oid = next(l.split(":", 1)[1] for l in pointer.splitlines() if l.startswith("oid sha256:"))
+    big_fingerprint = f"{oid}:{fields.get('DEFAULT_BIG_MODEL', '')}:{fields.get('DEFAULT_BIG_MODEL_REF', '')}"
+    big_combined_hash = hashlib.sha256(big_fingerprint.encode()).hexdigest()
 
     with open(BIG_MODEL_HASH_PATH, "w") as f:
       f.write(big_combined_hash)
@@ -56,9 +65,9 @@ def get_ref_for_name(url: str, name: str) -> str:
   response = requests.get(url, timeout=10)
   if response.status_code == 200:
     bundles = response.json()["bundles"]
-    matching = [bundle for bundle in bundles if re.search(name, f"{bundle['short_name']} {bundle['display_name']}", re.IGNORECASE)]
+    matching = [b for b in bundles if re.search(name, f"{b['short_name']} {b['display_name']}", re.IGNORECASE)]
     if matching:
-      return max(matching, key=lambda bundle: int(bundle["index"]))["ref"]
+      return max(matching, key=lambda b: int(b["index"]))["ref"]
   return ""
 
 

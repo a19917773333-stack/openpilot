@@ -47,6 +47,20 @@ class TestCameraOffset(OpenpilotTestCase):
     self.camera_offset.update(main_transform, extra_transform, sm, False)
     np.testing.assert_almost_equal(self.camera_offset.actual_camera_offset, 0.038)
 
+  def test_apply_camera_offset(self):
+    intrinsics = self.dc.narrow_road.intrinsics
+    v_horizon = CameraOffsetHelper.get_v_horizon(intrinsics, [])  # pitch = 0 fallback: v_horizon == cy
+    transform = np.eye(3, dtype=np.float32)
+    height = 1.22
+    offset = 0.1
+
+    expected_shear = np.eye(3, dtype=np.float32)
+    expected_shear[0, 1] = offset / height
+    expected_shear[0, 2] = -offset / height * v_horizon
+
+    result = CameraOffsetHelper.apply_camera_offset(transform, height, offset, v_horizon)
+    np.testing.assert_array_almost_equal(result, expected_shear)
+
   def test_v_horizon_empty_rpy(self):
     intrinsics = self.dc.narrow_road.intrinsics
     v_horizon = CameraOffsetHelper.get_v_horizon(intrinsics, [])
@@ -67,7 +81,7 @@ class TestCameraOffset(OpenpilotTestCase):
 
   def test_update(self):
     height = 1.2
-    pitch = np.radians(-4.0)
+    pitch = np.radians(-8.0)
 
     sm = MockStruct(
       deviceState=MockStruct(deviceType='mici'),
@@ -94,7 +108,7 @@ class TestCameraOffset(OpenpilotTestCase):
     for _ in range(100):
       main_out, extra_out = self.camera_offset.update(main_transform, extra_transform, sm, False)
 
-    # undo main_transform dot product to get sheer matrix
+    # undo main_transform dot product to get shear matrix
     shear = main_out @ np.linalg.inv(main_transform)
     expected_v_horizon = intrinsics_main[1, 2] - intrinsics_main[1, 1] * np.tan(pitch)
     np.testing.assert_almost_equal(shear[0, 1], self.camera_offset.actual_camera_offset / height, decimal=4)

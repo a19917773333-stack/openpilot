@@ -1,99 +1,73 @@
 import io
-import json
+import os
+import sys
 import pickle
-import shutil
 import struct
-import tempfile
 from pathlib import Path
 
-from openpilot.common.file_chunker import get_manifest_path
-from openpilot.common.hardware.usb import USB_DEVICES_PATH, is_chestnut_runtime_device
+from openpilot.common.file_chunker import get_chunk_name, get_manifest_path, open_file_chunked
+from openpilot.common.hardware import AGNOS
+from openpilot.common.hardware.usb import CHESTNUT_USB_PRODUCT, USB_DEVICES_PATH, is_chestnut_usb_id
 
 MODELS_DIR = Path(__file__).resolve().parent / 'models'
-TG_INPUT_DEVICES_PATH = MODELS_DIR / 'tg_input_devices.json'
-CHESTNUT_POWERED_VOLTAGE = 5000
-CHESTNUT_PCIE_READY = 0x78
 
-
-def get_tg_input_devices(process_name: str, chestnut: bool):
-  with open(TG_INPUT_DEVICES_PATH) as f:
-    return json.load(f)[process_name]['default' if not chestnut else 'chestnut']
 
 def modeld_pkl_path(chestnut: bool):
   prefix = 'big_' if chestnut else ''
   return MODELS_DIR / f'{prefix}driving_tinygrad.pkl'
 
-def dump_oob(obj, f):
-  with tempfile.TemporaryFile(dir=".") as tmp:
-    def buffer_callback(pb: pickle.PickleBuffer):
-      m = pb.raw()
-      tmp.write(struct.pack('<q', m.nbytes))
-      tmp.write(m)
-      pb.release() # keep peak ram at ~1 buffer
-    stream = io.BytesIO()
-    pickle.Pickler(stream, protocol=5, buffer_callback=buffer_callback).dump(obj)
-    opcodes = stream.getvalue()
-    f.write(struct.pack('<q', len(opcodes)))
-    f.write(opcodes)
-    tmp.seek(0)
-    shutil.copyfileobj(tmp, f)
-
-def load_oob(f, *, total_size: int | None = None, progress_callback=None):
-  bytes_read = 0
-
-  def read(size: int):
-    nonlocal bytes_read
-    data = f.read(size)
-    bytes_read += len(data)
-    if progress_callback is not None and total_size:
-      progress_callback(min(1.0, bytes_read / total_size))
-    return data
-
-  def readinto(view) -> int:
-    nonlocal bytes_read
-    count = f.readinto(view)
-    if count is None:
-      count = 0
-    bytes_read += count
-    if progress_callback is not None and total_size:
-      progress_callback(min(1.0, bytes_read / total_size))
-    return count
-
-  opcodes = read(struct.unpack('<q', read(8))[0])
-  def buffers():
-    while (h := read(8)):
-      pb = pickle.PickleBuffer(bytearray(struct.unpack('<q', h)[0]))
-      view = pb.raw()
-      offset = 0
-      while offset < len(view):
-        count = readinto(view[offset:])
-        if not count:
-          raise EOFError("truncated out-of-band pickle buffer")
-        offset += count
-      yield pb
-  result = pickle.load(io.BytesIO(opcodes), buffers=buffers())
-  if progress_callback is not None:
-    progress_callback(1.0)
-  return result
+def load_oob(path, chestnut=False):
+  from tinygrad import Context, Device
+  from tinygrad.device import Buffer
+  device = 'USB+AMD:LLVM' if chestnut else 'QCOM' if AGNOS else 'METAL' if sys.platform == 'darwin' else 'CPU:LLVM'
+  chunks = 0 if os.path.isfile(path) else int(Path(get_manifest_path(path)).read_text())
+  paths = [get_chunk_name(path, i, chunks) for i in range(chunks)] or [path]
+  with Context(DEV=device), open_file_chunked(path) as f:
+    opcodes = f.read(struct.unpack('<q', f.read(8))[0])
+    buffers, stage = Buffer(Device.DEFAULT, sum(map(os.path.getsize, paths)) - 8 - len(opcodes)).ensure_allocated(), bytearray(64 << 20)
+    for offset in range(0, buffers.nbytes, len(stage)):
+      n = f.readinto(piece := memoryview(stage)[:min(len(stage), buffers.nbytes - offset)])
+      if n != len(piece):
+        raise EOFError("incomplete model buffer")
+      buffers.view(n, offset).ensure_allocated().copy_from(Buffer("PYTHON", n, initial_value=piece[:n]))
+    return type("_Unpickler", (pickle.Unpickler,), {"persistent_load": lambda self, pid: buffers.view(*pid)})(io.BytesIO(opcodes)).load()
 
 def chestnut_present() -> bool:
   for d in USB_DEVICES_PATH.glob("*"):
     try:
-      device = {
-        "vendorId": int((d / "idVendor").read_text(), 16),
-        "productId": int((d / "idProduct").read_text(), 16),
-        "manufacturer": (d / "manufacturer").read_text().strip(),
-        "product": (d / "product").read_text().strip(),
-      }
-      if is_chestnut_runtime_device(device):
+      usb_id = (int((d / "idVendor").read_text(), 16), int((d / "idProduct").read_text(), 16))
+      product = (d / "product").read_text().strip()
+      if is_chestnut_usb_id(*usb_id) and product == CHESTNUT_USB_PRODUCT:
         return True
     except Exception:
       pass
   return False
 
+def _compiled_file(path: Path) -> bool:
+  try:
+    with path.open('rb') as f:
+      header = f.read(64)
+      return bool(header) and not header.startswith(b'version https://git-lfs.github.com/spec/v1')
+  except OSError:
+    return False
+
+
+def compiled_model_file(path: Path, expected_chunks: int | None = None) -> bool:
+  """Cheap loader-file completeness check; download/activation verifies hashes."""
+  if path.is_file():
+    return _compiled_file(path)
+  try:
+    count = int(Path(get_manifest_path(path)).read_text().strip())
+    # ponytail: cap probes at 1024 chunks (~45 GiB); raise only for larger supported models.
+    return 0 < count <= 1024 and (expected_chunks is None or count == expected_chunks) and all(
+      _compiled_file(Path(get_chunk_name(path, i, count))) for i in range(count))
+  except (OSError, ValueError):
+    return False
+
+
+def chestnut_warps_compiled() -> bool:
+  return all(_compiled_file(MODELS_DIR / f'big_driving_warp_{size}_tinygrad.pkl') for size in ('1344x760', '1928x1208'))
+
+
 def chestnut_compiled() -> bool:
-  return Path(get_manifest_path(modeld_pkl_path(chestnut=True))).is_file()
-
-
-def chestnut_ready(state) -> bool:
-  return state.supplyVoltage >= CHESTNUT_POWERED_VOLTAGE and not state.supplyFault and state.pcieLtssm == CHESTNUT_PCIE_READY
+  return compiled_model_file(modeld_pkl_path(chestnut=True)) and chestnut_warps_compiled()

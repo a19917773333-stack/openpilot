@@ -7,6 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 
 import time
 import os
+from pathlib import Path
 import requests
 from requests.exceptions import (SSLError, RequestException, HTTPError)
 from openpilot.common.params import Params
@@ -38,6 +39,13 @@ class ModelParser:
     artifact = custom.ModelManagerSP.Artifact()
     artifact.fileName = artifact_data.get("file_name")
     artifact.downloadUri = ModelParser._parse_download_uri(artifact_data.get("download_uri", {}))
+
+    if not artifact_data.get("chunks"):
+      name, digest = artifact.fileName, artifact.downloadUri.sha256
+      if not name or Path(name).name != name or name in (".", "..") or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError("Invalid model artifact filename or SHA256")
+      # Catalog generations reuse basenames for different compiled bytes; keep rollback files separate.
+      artifact.fileName = f"{digest}/{name}"
 
     if "chunks" in artifact_data:
       artifact.chunks = [ModelParser._parse_chunk(chunk_data) for chunk_data in artifact_data["chunks"]]
@@ -138,8 +146,9 @@ class ModelCache:
 
 class ModelFetcher:
   """Handles fetching and caching of model data from remote source"""
-  MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v22.json"
-  MODEL_URL_CHESTNUT = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_chestnut_v25.json"
+  CATALOG_REF = "da2d8dac5f77e3a6f72fefbfb14edea3555f05f6"
+  MODEL_URL = f"https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/{CATALOG_REF}/docs/driving_models_v25.json"
+  MODEL_URL_CHESTNUT = f"https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/{CATALOG_REF}/docs/driving_models_chestnut_v28.json"
 
   MODEL_SOURCES = {
     "qcom": (MODEL_URL, ""),

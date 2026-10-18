@@ -6,17 +6,18 @@ See the LICENSE.md file in the root directory for more details.
 """
 
 import hashlib
-import os
+from pathlib import Path
 import numpy as np
 
 from openpilot.cereal import custom
+from openpilot.common.file_chunker import get_chunk_name, get_manifest_path
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.hardware.hw import Paths
-from openpilot.selfdrive.modeld.helpers import chestnut_present, modeld_pkl_path
+from openpilot.selfdrive.modeld.helpers import chestnut_compiled, chestnut_present, chestnut_warps_compiled, compiled_model_file
 
 # SET ME TO THE EXACT JSON VERSION WE SET IN SUNNYPILOT_MODELS REPO
-REQUIRED_JSON_VERSION = 19
+REQUIRED_JSON_VERSION = 21
 
 CUSTOM_MODEL_PATH = Paths.model_root()
 ModelManager = custom.ModelManagerSP
@@ -33,7 +34,7 @@ def _compute_hash(file_path: str) -> str | None:
   try:
     with open_file_chunked(file_path) as file:
       return hashlib.file_digest(file, "sha256").hexdigest().lower()
-  except FileNotFoundError:
+  except OSError:
     return None
 
 
@@ -58,27 +59,59 @@ def is_bundle_version_compatible(bundle: dict) -> bool:
 
 def _bundle_artifacts(bundle: custom.ModelManagerSP.ModelBundle) -> list[tuple[str, str]]:
   artifacts = []
-  from openpilot.common.file_chunker import get_chunk_name
   for model in getattr(bundle, 'models', []) or []:
     for artifact in (getattr(model, 'artifact', None),):
       if artifact and getattr(artifact, 'fileName', None):
+        sha256 = getattr(artifact.downloadUri, 'sha256', None)
+        if sha256:
+          artifacts.append((artifact.fileName, sha256))
         if len(artifact.chunks) > 0:
           for i, chunk in enumerate(artifact.chunks):
             chunk_name = get_chunk_name(artifact.fileName, i, len(artifact.chunks))
             if getattr(chunk, 'sha256', None):
               artifacts.append((chunk_name, chunk.sha256))
-        else:
-          if getattr(artifact, 'downloadUri', None):
-            sha256 = getattr(artifact.downloadUri, 'sha256', None)
-            if sha256:
-              artifacts.append((artifact.fileName, sha256))
   return artifacts
 
 
+def _artifact_loader_files(artifact, model_root: Path) -> list[tuple[Path, str]]:
+  """Choose exactly the files the loader reads, rejecting paths outside model_root."""
+  if not artifact.fileName:
+    return []
+  path = model_root / artifact.fileName
+  if path.is_file():
+    files = [(path, artifact.downloadUri.sha256)]
+    paths = [path]
+  else:
+    count = len(artifact.chunks)
+    if not 0 < count <= 1024:
+      return []
+    manifest = Path(get_manifest_path(path))
+    try:
+      if not manifest.resolve().is_relative_to(model_root):
+        return []
+      if int(manifest.read_text().strip()) != count:
+        return []
+    except (OSError, RuntimeError, ValueError):
+      return []
+    files = [(Path(get_chunk_name(path, i, count)), chunk.sha256) for i, chunk in enumerate(artifact.chunks)]
+    paths = [manifest] + [file for file, _ in files]
+  try:
+    if not all(file.resolve().is_relative_to(model_root) for file in paths):
+      return []
+  except (OSError, RuntimeError, ValueError):
+    return []
+  return files if all(sha and file.is_file() and compiled_model_file(file) for file, sha in files) else []
+
+
 def _bundle_is_valid_locally(bundle: custom.ModelManagerSP.ModelBundle) -> bool:
-  model_root = Paths.model_root()
-  return all(_verify_file(os.path.join(model_root, file_name), expected_hash)
-             for file_name, expected_hash in _bundle_artifacts(bundle))
+  model_root = Path(Paths.model_root()).resolve()
+  if not bundle.models:
+    return False
+  for model in bundle.models:
+    files = _artifact_loader_files(model.artifact, model_root)
+    if not files or not all(_verify_file(str(file), sha) for file, sha in files):
+      return False
+  return True
 
 
 def _bundle_needs_reset(active_bundle: custom.ModelManagerSP.ModelBundle, available_bundles: list[custom.ModelManagerSP.ModelBundle] | None) -> bool:
@@ -108,39 +141,35 @@ def _bundle_needs_reset(active_bundle: custom.ModelManagerSP.ModelBundle, availa
   return not _bundle_is_valid_locally(active_bundle)
 
 
-def _parse_active_bundle(raw_bundle) -> "custom.ModelManagerSP.ModelBundle | None":
+def _parse_active_bundle(raw_bundle, *, allow_legacy: bool = False) -> "custom.ModelManagerSP.ModelBundle | None":
   try:
-    if isinstance(raw_bundle, dict) and raw_bundle and is_bundle_version_compatible(raw_bundle):
+    if isinstance(raw_bundle, dict) and raw_bundle and (is_bundle_version_compatible(raw_bundle) or
+                                                       (allow_legacy and raw_bundle.get("minimumSelectorVersion") == 20)):
       return custom.ModelManagerSP.ModelBundle(**raw_bundle)
   except Exception:
     pass
   return None
 
 
-def _upgrade_previous_selector_bundle(
-  raw_bundle: dict,
-  available_bundles: list[custom.ModelManagerSP.ModelBundle] | None,
-) -> "custom.ModelManagerSP.ModelBundle | None":
-  if (not available_bundles or
-      raw_bundle.get("minimumSelectorVersion") != REQUIRED_JSON_VERSION - 1):
-    return None
-  try:
-    previous_bundle = custom.ModelManagerSP.ModelBundle(**raw_bundle)
-  except Exception:
-    return None
-
-  for available_bundle in available_bundles:
-    same_selection = ((previous_bundle.ref and available_bundle.ref and previous_bundle.ref == available_bundle.ref) or
-                      (not previous_bundle.ref and previous_bundle.internalName == available_bundle.internalName))
-    if (same_selection and is_bundle_version_compatible(available_bundle.to_dict()) and
-        _bundle_is_valid_locally(available_bundle)):
-      return available_bundle
-  return None
-
-
-def get_selected_bundle(params: Params | None = None, source: str = "qcom") -> "custom.ModelManagerSP.ModelBundle | None":
+def get_selected_bundle(params: Params | None = None, source: str = "qcom", *, allow_legacy: bool = False) -> "custom.ModelManagerSP.ModelBundle | None":
   params = params or Params()
-  return _parse_active_bundle(params.get(ACTIVE_BUNDLE_KEYS[source]))
+  return _parse_active_bundle(params.get(ACTIVE_BUNDLE_KEYS[source]), allow_legacy=allow_legacy)
+
+
+def selected_chestnut_compiled(params: Params | None = None) -> bool:
+  """Selected Chestnut files + stock warps; empty/stale slot uses stock default.
+
+  SHA verification belongs to bundle activation, not periodic UI/hardware checks.
+  """
+  bundle = get_selected_bundle(params, source="chestnut")
+  if bundle is None:
+    return chestnut_compiled()
+  if not bundle.models:
+    return False
+  model_root = Path(Paths.model_root()).resolve()
+  if not all(_artifact_loader_files(model.artifact, model_root) for model in bundle.models):
+    return False
+  return chestnut_warps_compiled()
 
 
 def get_active_source(chestnut: bool | None = None, chestnut_active: bool | None = None,
@@ -156,39 +185,7 @@ def get_active_bundle(params: Params | None = None, *, chestnut: bool | None = N
   # no cross-slot fallback: an empty active slot means the hardware default, which
   # only stock modeld can run - modeld_v2 requires a real bundle
   params = params or Params()
-  source = get_active_source(chestnut=chestnut)
-  selected = get_selected_bundle(params, source)
-  if selected is None and source == 'qcom' and get_selected_bundle(params, 'chestnut') is not None:
-    return bundled_qcom_fallback()
-  return selected
-
-
-def bundled_qcom_fallback():
-  """Use the compiled channel default when a custom big model needs fallback.
-
-  Keep the ordinary stock runner for empty model selections. Build-generated
-  chunk sets may contain empty padding chunks, but every declared file must
-  exist and the combined artifact must contain data.
-  """
-  from openpilot.common.file_chunker import get_existing_chunks, get_chunked_file_size
-  from openpilot.sunnypilot.models.model_name import DEFAULT_MODEL
-  if DEFAULT_MODEL != 'CD210':
-    return None  # Revalidate the metadata contract before changing defaults.
-  pkl_path = str(modeld_pkl_path(False))
-  try:
-    if not all(os.path.isfile(path) for path in get_existing_chunks(pkl_path)) or get_chunked_file_size(pkl_path) <= 0:
-      return None
-  except (OSError, ValueError):
-    return None
-  bundle = custom.ModelManagerSP.ModelBundle(internalName=DEFAULT_MODEL, displayName='CD210 (Bundled)',
-    ref='bundled-cd210', environment='bundled', generation=12, is20hz=True,
-    runner='tinygrad', minimumSelectorVersion=REQUIRED_JSON_VERSION, status='downloaded',
-    overrides=[{'key': 'lat', 'value': '.0'}, {'key': 'long', 'value': '.3'}])
-  model = custom.ModelManagerSP.Model()
-  model.type = 'chunked'
-  model.artifact.fileName = pkl_path
-  bundle.models = [model]
-  return bundle
+  return get_selected_bundle(params, get_active_source(chestnut=chestnut))
 
 
 def resolve_bundle_by_ref(
@@ -209,15 +206,21 @@ def _validate_active_bundle(params: Params, source: str, available_bundles: list
   if not raw_bundle:
     return
 
+  if raw_bundle.get("minimumSelectorVersion") == 20:
+    # Preserve the previous logical selection until its new compiled artifact is ready.
+    matching = next((bundle for bundle in available_bundles or [] if bundle.ref == raw_bundle.get("ref")), None)
+    if matching is not None:
+      if _bundle_is_valid_locally(matching):
+        params.put(key, matching.to_dict(), block=True)
+        _LAST_VALIDATED_RAW[key] = matching.to_dict()
+      elif params.get("ModelManager_DownloadRef") is None:
+        params.put("ModelManager_DownloadRef", matching.ref)
+    return
+
   if _LAST_VALIDATED_RAW.get(key) == raw_bundle:
     return
 
   active_bundle = _parse_active_bundle(raw_bundle)
-  if active_bundle is None and isinstance(raw_bundle, dict):
-    active_bundle = _upgrade_previous_selector_bundle(raw_bundle, available_bundles)
-    if active_bundle is not None:
-      raw_bundle = active_bundle.to_dict()
-      params.put(key, raw_bundle, block=True)
   if active_bundle is None or _bundle_needs_reset(active_bundle, available_bundles):
     cloudlog.warning(f"Active model bundle invalid for {source}; resetting to default")
     params.remove(key)

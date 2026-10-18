@@ -13,14 +13,13 @@ import tempfile
 import threading
 import time
 import unittest
-from typing import Any, cast
+from typing import Any
 from unittest import mock
 
 import requests
 from urllib3.connectionpool import HTTPConnectionPool
 
 from openpilot.cereal import custom
-from openpilot.common.params import Params
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.common.file_chunker import get_chunk_name, get_manifest_path
 from openpilot.selfdrive.test.helpers import http_server_context
@@ -182,23 +181,6 @@ class TestManagerDownload(ManagerDownloadTestBase):
 
       assert not os.path.isfile(base_path), "base file should be removed after chunking"
       assert artifact.fileName not in self.manager._download_start_times
-    self.run_with_server(body)
-
-  def test_cached_chunks_repair_missing_manifest_without_network(self):
-    def body():
-      artifact = self.make_artifact(chunked=True)
-      base_path = os.path.join(self.dest, artifact.fileName)
-      for path, data in zip(self.chunk_paths(base_path), CHUNK_BODIES, strict=True):
-        with open(path, 'wb') as f:
-          f.write(data)
-
-      asyncio.run(self.manager._process_artifact(artifact, self.dest))
-
-      assert artifact.downloadProgress.status == custom.ModelManagerSP.DownloadStatus.cached
-      assert DownloadHandler.request_paths == []
-      with open(get_manifest_path(base_path)) as f:
-        assert f.read() == str(len(CHUNK_BODIES))
-
     self.run_with_server(body)
 
   def test_progress_is_monotonic_and_bounded(self):
@@ -692,35 +674,6 @@ class TestActiveBundleValidation(OpenpilotTestCase):
     with mock.patch("openpilot.sunnypilot.models.helpers.chestnut_present", return_value=False):
       validate_active_bundles(params, {"qcom": [], "chestnut": []})
     params.remove.assert_not_called()
-
-  def test_previous_selector_bundle_is_upgraded_from_matching_catalog_without_losing_selection(self):
-    current_raw = self._raw_bundle("same", runner=int(custom.ModelManagerSP.Runner.tinygrad))
-    previous_raw = dict(current_raw)
-    previous_raw["minimumSelectorVersion"] = helpers.REQUIRED_JSON_VERSION - 1
-
-    class MutableParams:
-      def __init__(self):
-        self.values = {"ModelManager_ActiveBundle": previous_raw}
-        self.removed = []
-
-      def get(self, key, *args, **kwargs):
-        return self.values.get(key)
-
-      def put(self, key, value, block=False):
-        self.values[key] = value
-
-      def remove(self, key):
-        self.removed.append(key)
-        self.values.pop(key, None)
-
-    params = MutableParams()
-    validate_active_bundles(cast(Params, params), {
-      "qcom": [custom.ModelManagerSP.ModelBundle(**current_raw)],
-      "chestnut": [],
-    })
-
-    assert params.removed == []
-    assert params.values["ModelManager_ActiveBundle"] == current_raw
 
   def test_reset_recomputes_runner_from_surviving_slot(self):
     tinygrad = int(custom.ModelManagerSP.Runner.tinygrad)

@@ -9,19 +9,14 @@ See the LICENSE.md file in the root directory for more details.
 from collections.abc import Callable
 import os
 os.environ['GMMU'] = '0'
-from openpilot.common.hardware import COMMA_HARDWARE
-from openpilot.selfdrive.modeld.helpers import chestnut_present
-from openpilot.sunnypilot.modeld_v2.egpu_loader import C3XL_MODEL_LOAD_TIMEOUT, configure_default_device, load_with_progress, load_with_timeout
-from openpilot.sunnypilot.hardware.profile import HardwareProfile, get_hardware_profile
-configure_default_device(COMMA_HARDWARE, c3xl=get_hardware_profile() == HardwareProfile.C3XL)
 import numpy as np
+import threading
 import time
 from setproctitle import setproctitle
-from tinygrad.helpers import Context
-from tinygrad.tensor import Tensor
 
 import openpilot.cereal.messaging as messaging
-from openpilot.sunnypilot.modeld_v2.helpers import load_oob
+from openpilot.common.hardware import COMMA_HARDWARE
+from openpilot.selfdrive.modeld.helpers import chestnut_present, modeld_pkl_path
 from openpilot.cereal import log
 from opendbc.car.structs import car
 from openpilot.cereal.services import SERVICE_LIST
@@ -29,33 +24,30 @@ from openpilot.cereal.messaging import PubMaster, SubMaster
 from openpilot.cereal.visionipc import VisionStreamType
 from msgq.visionipc import VisionIpcClient, VisionBuf
 from opendbc.car.car_helpers import get_demo_car_params
-from openpilot.common.file_chunker import get_chunked_file_size, open_file_chunked
+from openpilot.common.file_chunker import open_file_chunked
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.params import Params
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import config_realtime_process, DT_MDL
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.transformations.model import get_warp_matrix
-from openpilot.system import sentry
-from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value
-from openpilot.selfdrive.modeld.modeld import ChestnutState
+from openpilot.selfdrive.modeld.modeld import ChestnutGpuState
+from openpilot.sunnypilot.modeld_v2.egpu_loader import C3XL_MODEL_LOAD_TIMEOUT
 
-from openpilot.selfdrive.modeld.compile_modeld import (
-  MODELD_INPUTS,
-  make_input_queues as make_stock_input_queues,
-)
 from openpilot.sunnypilot.modeld_v2.fill_model_msg import fill_model_msg, fill_pose_msg, PublishState, get_curvature_from_output
 from openpilot.sunnypilot.modeld_v2.parse_model_outputs import Parser
 from openpilot.sunnypilot.modeld_v2.constants import ModelConstants, Plan
 from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper
-from openpilot.sunnypilot.modeld_v2.compile_modeld import (derive_frame_skip, make_split_input_queues,
-                                                           make_supercombo_input_queues, nv12_copy_size,
-                                                           WARP_INPUTS, POLICY_INPUTS)
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
+from openpilot.sunnypilot.modeld_v2.helpers import MAGIC, load_model
+from openpilot.sunnypilot.modeld_v2.frame_fusion import fused_with_warp
+from tinygrad.engine.realize import lower_and_compile
+from openpilot.selfdrive.modeld.helpers import load_oob as load_stock_oob
+from openpilot.sunnypilot.modeld_v2.model_adapters import get_model_adapter
 from openpilot.sunnypilot.models.helpers import get_active_bundle
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_change_blocker import (
   LaneChangeBoundaryBlocker,
@@ -88,58 +80,6 @@ def _find_driving_pkl(bundle):
   return None
 
 
-def load_models_with_fallback(*, chestnut, load_big, load_small, params, update_loading_progress):
-  model = None
-  small_model = None
-  if chestnut:
-    try:
-      model = load_with_timeout(load_big, BIG_MODEL_TIMEOUT)
-    except Exception:
-      cloudlog.exception("chestnut load failed")
-      params.put_bool("ChestnutActive", False, block=True)
-      params.put_bool("ChestnutModelError", True, block=True)
-      update_loading_progress(0)
-    else:
-      params.put_bool("ChestnutActive", True, block=True)
-      params.remove("ChestnutModelError")
-      update_loading_progress(100)
-
-  params.put_bool("ChestnutLoading", False, block=True)
-  if model is None:
-    small_model = load_small()
-    model = small_model
-  elif chestnut:
-    try:
-      small_model = load_small()
-    except Exception:
-      cloudlog.exception("small fallback preload failed; continuing with chestnut")
-  assert model is not None
-  return model, small_model
-
-
-def run_model_with_fallback(model, small_model, params, chestnut_state, bufs, transforms, inputs, after_enqueue=None):
-  try:
-    return model, model.run(bufs, transforms, inputs, after_enqueue=after_enqueue), False
-  except Exception as error:
-    if not params.get_bool("ChestnutActive"):
-      raise
-    params.put_bool("ChestnutActive", False, block=True)
-    params.put_bool("ChestnutModelError", True, block=True)
-    if small_model is None:
-      cloudlog.exception("chestnut failed and small fallback unavailable")
-      raise RuntimeError("chestnut failed and small fallback unavailable") from error
-    cloudlog.exception("chestnut failed, falling back to small")
-    if chestnut_state is not None:
-      chestnut_state.big = False
-    return small_model, None, True
-
-
-def validate_model_outputs(*, chestnut, outputs):
-  if chestnut and not all(np.all(np.isfinite(value)) for value in outputs.values() if isinstance(value, np.ndarray)):
-    raise RuntimeError("model output not finite")
-  return outputs
-
-
 class FrameMeta:
   frame_id: int = 0
   timestamp_sof: int = 0
@@ -154,7 +94,7 @@ class ModelState(ModelStateBase):
   inputs: dict[str, np.ndarray]
   prev_desire: np.ndarray
 
-  def __init__(self, cam_w: int, cam_h: int, chestnut: bool = False, loading_progress_callback=None):
+  def __init__(self, cam_w: int, cam_h: int, chestnut: bool = False):
     ModelStateBase.__init__(self)
 
     env_pkl = os.environ.get('COMBINED_MODEL_PKL')
@@ -172,75 +112,54 @@ class ModelState(ModelStateBase):
     self.chestnut = chestnut
 
     pkl_path = _find_driving_pkl(model_bundle)
+    if pkl_path is None and not chestnut and model_bundle is None:
+      default_pkl = modeld_pkl_path(chestnut=False)
+      pkl_path = str(default_pkl) if _pkl_exists(default_pkl) else None
     assert pkl_path is not None, f"No driving pkl found for {'chestnut' if chestnut else 'small model'} — all models must be compiled with compile_modeld.py"
-    self._init_combined(pkl_path, cam_w, cam_h, model_bundle, loading_progress_callback)
+    self._init_combined(pkl_path, cam_w, cam_h, model_bundle)
+    if not chestnut:
+      try:
+        self.warmup()
+      except RuntimeError as e:
+        if str(e) != "model output not finite":
+          raise
+        default_pkl = str(modeld_pkl_path(chestnut=False))
+        if str(pkl_path) == default_pkl:
+          raise
+        cloudlog.exception("small model output invalid; falling back to bundled model")
+        self.generation = None
+        self._init_combined(default_pkl, cam_w, cam_h, None)
+        self.warmup()
 
-  def _init_combined(self, pkl_path, cam_w, cam_h, bundle, loading_progress_callback=None):
+  def _init_combined(self, pkl_path, cam_w, cam_h, bundle):
     cloudlog.warning(f"loading combined pkl: {pkl_path}")
-    def report_read_progress(value: float):
-      if loading_progress_callback is not None:
-        loading_progress_callback(5 + int(value * 70))
-
-    total_size = get_chunked_file_size(pkl_path)
-    with open_file_chunked(pkl_path) as model_file:
-      if self.chestnut:
-        with Context(DEV="USB+AMD:LLVM"):
-          jits = load_with_progress(load_oob, model_file, total_size=total_size, progress_callback=report_read_progress)
-      else:
-        jits = load_with_progress(load_oob, model_file, total_size=total_size, progress_callback=report_read_progress)
-    if loading_progress_callback is not None:
-      loading_progress_callback(80)
+    with open_file_chunked(pkl_path) as source:
+      plain = source.read(len(MAGIC)) == MAGIC
+    if plain:
+      jits = load_model(pkl_path, extend=fused_with_warp(cam_w, cam_h, self.chestnut))
+    else:
+      # Only the bundled default uses the runtime's OOB format; selector models are plain.
+      assert str(pkl_path) == str(modeld_pkl_path(chestnut=False)) and not self.chestnut
+      jits = load_stock_oob(pkl_path)
+      jits['run'].captured._linear = lower_and_compile(jits['run'].captured._linear)
 
     metadata = jits['metadata']
     self.WARP_DEV = metadata.get('warp_dev', 'QCOM') if COMMA_HARDWARE else 'CPU'
     self.DEV = ('AMD' if self.chestnut else 'QCOM') if COMMA_HARDWARE else 'CPU'
     self.QUEUE_DEV = self.DEV
-    self.is_run_model = 'run_model' in jits
-
-    nv12_info = get_nv12_info(cam_w, cam_h)
-    self.frame_copy_size = nv12_copy_size(*nv12_info[:3])
-    self.full_frames: dict = {}
-    self._blob_cache: dict = {}
-    self.frame_buffers: dict = {}
-
-    if self.is_run_model or 'model' in metadata:
-      model_metadata = metadata.get('model', metadata)
-      self.input_shapes = model_metadata['input_shapes']
-      self.vision_output_slices = model_metadata['output_slices']
-      self.policy_output_slices = {}
-      self._policy_slices_list = []
-      self._combined_model_type = 'supercombo'
-      self._vision_input_names = [key for key in self.input_shapes if 'img' in key]
-      self.frame_skip = derive_frame_skip({}, self.input_shapes)
-      if self.is_run_model:
-        self.input_queues, self.numpy_inputs, self.frame_buffers = make_stock_input_queues(
-          self.input_shapes, self.frame_skip, device=self.DEV, frame_copy_size=self.frame_copy_size)
-        self.frame_views, self.npy = self.frame_buffers, self.numpy_inputs
-        self.run_model, self.run_policy, self.warp = jits['run_model'][(cam_w, cam_h)], None, None
-      else:
-        self.input_queues, self.numpy_inputs = make_supercombo_input_queues(self.input_shapes, self.frame_skip, device=self.QUEUE_DEV)
-        self.run_model, self.run_policy, self.warp = None, jits['run_policy'], jits[(cam_w, cam_h)]
-    else:
-      self.run_model, self.run_policy, self.warp = None, jits['run_policy'], jits[(cam_w, cam_h)]
-      vision_metadata = metadata['vision']
-      policy_keys = [k for k in metadata if k not in ('vision', 'warp_dev')]
-      self._combined_model_type = 'split' if policy_keys == ['policy'] else 'multi_policy'
-      self.vision_output_slices = vision_metadata['output_slices']
-      self._policy_keys = policy_keys
-      self._policy_slices_list = [metadata[k]['output_slices'] for k in policy_keys]
-      self.policy_output_slices = self._policy_slices_list[0]
-      self._has_on_policy = any('on' in k.lower() for k in policy_keys)
-      self._vision_input_names = [key for key in vision_metadata['input_shapes'] if 'img' in key]
-      first_policy_meta = metadata[policy_keys[0]]
-      frame_skip = derive_frame_skip(vision_metadata['input_shapes'], first_policy_meta['input_shapes'])
-      self.input_queues, self.numpy_inputs = make_split_input_queues(vision_metadata['input_shapes'],
-                                                                     first_policy_meta['input_shapes'],
-                                                                     frame_skip, device=self.QUEUE_DEV)
-
-    self._desire_key = next(key for key in self.numpy_inputs if key.startswith('desire'))
-    self._road_key = next(key for key in self._vision_input_names if 'big' not in key)
-    self._wide_key = next(key for key in self._vision_input_names if 'big' in key)
-    self.frame_buf_params = dict.fromkeys(self._vision_input_names, nv12_info)
+    self.adapter = get_model_adapter(jits, cam_w, cam_h, self.DEV, self.QUEUE_DEV, self.WARP_DEV, self.chestnut)
+    self.vision_output_slices = self.adapter.vision_output_slices
+    self.policy_output_slices = self.adapter.policy_output_slices
+    self._policy_slices_list = self.adapter._policy_slices_list
+    self._combined_model_type = self.adapter._combined_model_type
+    self._vision_input_names = self.adapter._vision_input_names
+    self.numpy_inputs = self.adapter.numpy_inputs
+    self._policy_keys = self.adapter._policy_keys
+    self._has_on_policy = self.adapter._has_on_policy
+    self._desire_key = self.adapter._desire_key
+    self._road_key = self.adapter._road_key
+    self._wide_key = self.adapter._wide_key
+    self.frame_buf_params = self.adapter.frame_buf_params
 
     is_20hz = bundle.is20hz if bundle else self._combined_model_type in ('split', 'multi_policy')
     if is_20hz:
@@ -252,31 +171,10 @@ class ModelState(ModelStateBase):
     self.parser = Parser()
     self.prev_desire = np.zeros(self.constants.DESIRE_LEN, dtype=np.float32)
 
-    if self.warp is not None:
-      self.full_frames = {k: Tensor(np.zeros(nv12_info[3], dtype=np.uint8), device=self.WARP_DEV).contiguous().realize() for k in self._vision_input_names}
-      self.warp(**{k: self.input_queues[k] for k in WARP_INPUTS}, frame=self.full_frames[self._road_key], big_frame=self.full_frames[self._wide_key])
-
-    if self.chestnut:
-      self.warmup()
-      if loading_progress_callback is not None:
-        loading_progress_callback(95)
-
   def warmup(self) -> None:
-    dummy_size = self.frame_copy_size if self.is_run_model else self.frame_buf_params[self._road_key][3]
-    dummy_frames = {k: np.zeros(dummy_size, dtype=np.uint8) for k in self._vision_input_names}
-    transforms = {k: np.eye(3, dtype=np.float32) for k in [self._road_key, self._wide_key] if k}
-    dummy_inputs = {k: np.zeros(v.shape, dtype=v.dtype) for k, v in self.numpy_inputs.items() if k not in ['tfm', 'big_tfm', 'prev_feat']}
+    dummy_frames, transforms, dummy_inputs = self.adapter.get_dummy_inputs()
     self.run(dummy_frames, transforms, dummy_inputs)
-    if self.is_run_model:
-      self.input_queues, self.numpy_inputs, self.frame_buffers = make_stock_input_queues(
-        self.input_shapes, self.frame_skip, device=self.DEV, frame_copy_size=self.frame_copy_size)
-      self.frame_views = self.frame_buffers
-      self.npy = self.numpy_inputs
-    else:
-      for v in self.numpy_inputs.values():
-        v[:] = 0
-      self.full_frames.clear()
-      self._blob_cache.clear()
+    self.adapter.reset_warmup_buffers()
     self.prev_desire[:] = 0
 
   @property
@@ -294,66 +192,57 @@ class ModelState(ModelStateBase):
   def run(self, bufs: dict[str, VisionBuf], transforms: dict[str, np.ndarray],
           inputs: dict[str, np.ndarray],
           after_enqueue: Callable[[], None] | None = None) -> dict[str, np.ndarray] | None:
-    if self.is_run_model:
-      for key, buf in bufs.items():
-        data = buf.data if hasattr(buf, 'data') else buf
-        np.copyto(self.frame_buffers[key], np.frombuffer(data, dtype=np.uint8, count=self.frame_copy_size))
-    else:
-      for key, buf in bufs.items():
-        ptr = np.frombuffer(buf.data, dtype=np.uint8).ctypes.data
-        cache_key = (key, ptr)
-        if cache_key not in self._blob_cache:
-          self._blob_cache[cache_key] = Tensor.from_blob(ptr, (self.frame_buf_params[key][3],), dtype='uint8', device=self.WARP_DEV)
-        self.full_frames[key] = self._blob_cache[cache_key]
+    self.adapter.copy_frames(bufs)
 
     desire_key = self.desire_key
     inputs[desire_key][0] = 0
-    self.numpy_inputs[desire_key][:] = np.where(inputs[desire_key] - self.prev_desire > .99, inputs[desire_key], 0)
+    (self.numpy_inputs[desire_key].flat if self.adapter.is_native else self.numpy_inputs[desire_key])[:] = \
+      np.where(inputs[desire_key] - self.prev_desire > .99, inputs[desire_key], 0)
     self.prev_desire[:] = inputs[desire_key]
 
     for key in ('traffic_convention', 'lateral_control_params', 'action_t'):
       if key in self.numpy_inputs and key in inputs:
         self.numpy_inputs[key][:] = inputs[key]
 
-    self.numpy_inputs['tfm'][:, :] = transforms[self._road_key].reshape(3, 3)
-    self.numpy_inputs['big_tfm'][:, :] = transforms[self._wide_key].reshape(3, 3)
-
-    if self.run_model is not None:
-      outs, = self.run_model(**{k: self.input_queues[k] for k in MODELD_INPUTS})
-      raw_outputs = outs
+    if self.adapter.is_native:
+      for i, key in enumerate(self._vision_input_names):
+        if key in transforms:
+          self.numpy_inputs['tfm'][i] = transforms[key].reshape(3, 3)
     else:
-      assert self.warp is not None and self.run_policy is not None
-      warped = self.warp(**{k: self.input_queues[k] for k in WARP_INPUTS}, frame=self.full_frames[self._road_key], big_frame=self.full_frames[self._wide_key])
-      raw_outputs = self.run_policy(**{k: self.input_queues[k] for k in POLICY_INPUTS if k in self.input_queues}, warped=warped)
+      self.numpy_inputs['tfm'][:, :] = transforms[self._road_key].reshape(3, 3)
+      self.numpy_inputs['big_tfm'][:, :] = transforms[self._wide_key].reshape(3, 3)
+
+    raw_outputs = self.adapter.run()
 
     if after_enqueue is not None:
       after_enqueue()
 
     if self._combined_model_type == 'supercombo':
       model_output = raw_outputs.numpy().flatten()
-      if self.chestnut and not np.all(np.isfinite(model_output)):
+      if not np.all(np.isfinite(model_output)):
         raise RuntimeError("model output not finite")
       sliced = {k: model_output[np.newaxis, v] for k, v in self.vision_output_slices.items()}
       outputs = self.parser.parse_outputs(sliced)
       if 'prev_feat' in self.numpy_inputs and 'hidden_state' in self.vision_output_slices:
-        self.numpy_inputs['prev_feat'][:] = model_output[self.vision_output_slices['hidden_state']]
+        (self.numpy_inputs['prev_feat'].flat if self.adapter.is_native else self.numpy_inputs['prev_feat'])[:] = \
+          model_output[self.vision_output_slices['hidden_state']]
     else:
       vision_output = raw_outputs[0].numpy().flatten()
       vision_sliced = {k: vision_output[np.newaxis, v] for k, v in self.vision_output_slices.items()}
       outputs = self.parser.parse_vision_outputs(vision_sliced)
 
       if 'prev_feat' in self.numpy_inputs and 'hidden_state' in self.vision_output_slices:
-        self.numpy_inputs['prev_feat'][:] = vision_output[self.vision_output_slices['hidden_state']]
+        (self.numpy_inputs['prev_feat'].flat if self.adapter.is_native else self.numpy_inputs['prev_feat'])[:] = \
+          vision_output[self.vision_output_slices['hidden_state']]
 
       for i, policy_slices in enumerate(self._policy_slices_list):
         policy_output = raw_outputs[i + 1].numpy().flatten()
         policy_sliced = {k: policy_output[np.newaxis, v] for k, v in policy_slices.items()}
         parsed = self.parser.parse_policy_outputs(policy_sliced)
-        if ('off' in self._policy_keys[i]
-          and self._has_on_policy
-          and any('plan' in self._policy_slices_list[j] for j, k in enumerate(self._policy_keys) if 'on' in k.lower())):
-
-          parsed.pop('plan', None)
+        if 'off' in self._policy_keys[i] and self._has_on_policy:
+          for key in ('plan', 'planplus', 'action'):
+            if any(key in self._policy_slices_list[j] for j, k in enumerate(self._policy_keys) if 'on' in k.lower()):
+              parsed.pop(key, None)
 
         outputs.update(parsed)
 
@@ -365,7 +254,7 @@ class ModelState(ModelStateBase):
       buf[0, :-1] = buf[0, 1:]
       buf[0, -1, :] = outputs['desired_curvature'][0, :] if not self.mlsim else 0
 
-    return validate_model_outputs(chestnut=self.chestnut, outputs=outputs)
+    return outputs
 
   def get_action_from_model(self, model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                             lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
@@ -396,27 +285,18 @@ class ModelState(ModelStateBase):
 def main(demo=False):
   cloudlog.warning("modeld init")
 
-  sentry.set_tag("daemon", PROCESS_NAME)
   cloudlog.bind(daemon=PROCESS_NAME)
   setproctitle(PROCESS_NAME)
   config_realtime_process(7, 54)
 
   CHESTNUT = chestnut_present()
   if CHESTNUT:
-    os.environ['HCQDEV_WAIT_TIMEOUT_MS'] = '3000'
+    from tinygrad.runtime.ops_amd import AMDDevice
+    AMDDevice.wait_timeout_ms = 3000
 
   params = Params()
   params.put_bool("ChestnutLoading", CHESTNUT)
-  params.put("ChestnutLoadingProgress", 1 if CHESTNUT else 0, block=True)
   params.remove("ChestnutActive")
-
-  last_loading_progress = -1
-  def update_loading_progress(progress: int):
-    nonlocal last_loading_progress
-    progress = max(0, min(100, int(progress)))
-    if progress != last_loading_progress:
-      params.put("ChestnutLoadingProgress", progress, block=True)
-      last_loading_progress = progress
 
   # visionipc clients
   while True:
@@ -441,26 +321,37 @@ def main(demo=False):
   if use_extra_client:
     cloudlog.warning(f"connected extra cam with buffer size: {vipc_client_extra.buffer_len} ({vipc_client_extra.width} x {vipc_client_extra.height})")
 
-  if os.getenv('C3XL_IFE_ROAD_SIZE') == '1344x760':
-    if ((vipc_client_main.width, vipc_client_main.height) != (1344, 760) or
-        (use_extra_client and (vipc_client_extra.width, vipc_client_extra.height) != (1344, 760))):
-      raise RuntimeError('IFE road resize requested but actual camera dimensions do not match')
-
   cloudlog.warning("loading model")
   st = time.monotonic()
 
-  model, small_model = load_models_with_fallback(
-    chestnut=CHESTNUT,
-    load_big=lambda: ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=True,
-                                loading_progress_callback=update_loading_progress),
-    load_small=lambda: ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=False),
-    params=params,
-    update_loading_progress=update_loading_progress,
-  )
+  model = None
+  if CHESTNUT:
+    big_model = None
+    def load_big():
+      nonlocal big_model
+      try:
+        m = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=True)
+        m.warmup()
+        big_model = m
+      except Exception:
+        cloudlog.exception("chestnut load failed")
+    loader = threading.Thread(target=load_big, daemon=True)
+    loader.start()
+    loader.join(BIG_MODEL_TIMEOUT)
+    model = big_model
+    params.put_bool("ChestnutActive", model is not None)
+
+  small_model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=False) if model is None or CHESTNUT else None
+  if model is None:
+    model = small_model
+  params.put_bool("ChestnutLoading", False)
+  assert model is not None
   cloudlog.warning(f"models loaded in {time.monotonic() - st:.1f}s, modeld starting")
 
   # messaging
-  pub_socks = ["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"] + (["chestnutState"] if CHESTNUT else [])
+  pub_socks = ["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"] + (
+    ["chestnutState", "chestnutGpuState"] if CHESTNUT else []
+  )
   pm = PubMaster(pub_socks)
   sm = SubMaster([
     "deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState",
@@ -468,12 +359,11 @@ def main(demo=False):
   ])
 
   publish_state = PublishState()
-  chestnut_state = ChestnutState(pm, model.chestnut) if CHESTNUT else None
+  chestnut_state = ChestnutGpuState(pm, model.chestnut) if CHESTNUT else None
+  LINE_BLOCKER = LaneChangeBoundaryBlocker()
 
   # setup filter to track dropped frames
   frame_dropped_filter = FirstOrderFilter(0., 10., 1. / model.constants.MODEL_FREQ)
-  model_fps_filter = FirstOrderFilter(0., 2., 1. / model.constants.MODEL_FREQ, initialized=False)
-  last_model_output_t: float | None = None
   frame_id = 0
   last_vipc_frame_id = 0
   run_count = 0
@@ -500,7 +390,6 @@ def main(demo=False):
   DH = DesireHelper()
   meta_constants = load_meta_constants()
   RELC = RoadEdgeLaneChangeController()
-  LINE_BLOCKER = LaneChangeBoundaryBlocker()
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -591,25 +480,25 @@ def main(demo=False):
       inputs['action_t'] = np.array([lat_action_t, long_action_t], dtype=np.float32)
 
     mt1 = time.perf_counter()
-    send_chestnut = (chestnut_state is not None and
-                    run_count % round(model.constants.MODEL_FREQ / SERVICE_LIST['chestnutState'].frequency) == 0)
-    model, model_output, fell_back = run_model_with_fallback(
-      model, small_model, params, chestnut_state, bufs, transforms, inputs,
-      after_enqueue=chestnut_state.send if send_chestnut else None,
-    )
-    if fell_back:
+    try:
+      send_chestnut = (chestnut_state is not None and
+                       run_count % round(model.constants.MODEL_FREQ / SERVICE_LIST['chestnutGpuState'].frequency) == 0)
+      model_output = model.run(bufs, transforms, inputs, chestnut_state.send if send_chestnut else None)
+    except Exception:
+      if not params.get_bool("ChestnutActive"):
+        raise
+      cloudlog.exception("big model failed, fall back to small")
+      params.put_bool("ChestnutActive", False)
+      assert small_model is not None
+      model = small_model
+      if chestnut_state is not None:
+        chestnut_state.big = False
       run_count = 0
-      long_delay = CP.longitudinalActuatorDelay + model.LONG_SMOOTH_SECONDS
+      model_output = None
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
 
     if model_output is not None:
-      model_output_t = time.monotonic()
-      if last_model_output_t is not None:
-        model_fps_filter.update(1.0 / max(model_output_t - last_model_output_t, 1e-3))
-      last_model_output_t = model_output_t
-      if chestnut_state is not None:
-        chestnut_state.model_fps = float(model_fps_filter.x)
       modelv2_send = messaging.new_message('modelV2')
       drivingdata_send = messaging.new_message('drivingModelData')
       posenet_send = messaging.new_message('cameraOdometry')
@@ -680,5 +569,5 @@ if __name__ == "__main__":
   except KeyboardInterrupt:
     cloudlog.warning(f"child {PROCESS_NAME} got SIGINT")
   except Exception:
-    sentry.capture_exception()
+    cloudlog.exception("modeld exception")
     raise

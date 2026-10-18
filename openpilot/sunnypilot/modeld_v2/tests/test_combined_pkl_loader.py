@@ -5,8 +5,6 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
-from copy import deepcopy
-
 from openpilot.common.parameterized import parameterized
 
 import openpilot.sunnypilot.models.helpers as helpers
@@ -14,7 +12,7 @@ import openpilot.sunnypilot.modeld_v2.modeld as modeld_module
 from openpilot.sunnypilot.modeld_v2.modeld import _find_driving_pkl
 from openpilot.sunnypilot.modeld_v2.tests import helpers as tests_helpers
 from openpilot.sunnypilot.modeld_v2.tests.helpers import DummyModel, DummyBundle, ARCHETYPES, CAM_W, CAM_H, \
-  SPLIT_VISION_INPUT_SHAPES, SPLIT_POLICY_INPUT_SHAPES
+  SPLIT_VISION_INPUT_SHAPES
 from openpilot.common.test import OpenpilotTestCase
 
 # resolved by name from this module when a test asks for them
@@ -35,9 +33,7 @@ class TestFindDrivingPkl(OpenpilotTestCase):
     bundle = DummyBundle(models=[])
     assert _find_driving_pkl(bundle) is None
 
-  def test_returns_none_when_pkl_not_on_disk(self, tmp_path, monkeypatch):
-    from openpilot.common.hardware import hw
-    monkeypatch.setattr(hw.Paths, 'model_root', staticmethod(lambda: str(tmp_path)))
+  def test_returns_none_when_pkl_not_on_disk(self):
     bundle = DummyBundle(models=[
       DummyModel('vision', 'driving_fof_tinygrad.pkl'),
       DummyModel('policy', 'driving_fof_tinygrad.pkl'),
@@ -61,29 +57,6 @@ class TestFindDrivingPkl(OpenpilotTestCase):
 # Init — assertion guard
 
 class TestModelStateCombinedInit(OpenpilotTestCase):
-  def test_rejects_retired_nested_pickle_format(self, model_state_factory, monkeypatch):
-    archetype = ARCHETYPES['supercombo_non20hz']
-    current = tests_helpers.make_pkl_data(archetype)
-    retired = {
-      'metadata': current['metadata'],
-      (CAM_W, CAM_H): {
-        'warp_enqueue': current[(CAM_W, CAM_H)],
-        'run_policy': current['run_policy'],
-      },
-    }
-    monkeypatch.setattr(tests_helpers, 'make_pkl_data', lambda _: retired)
-    with self.assertRaisesRegex(KeyError, 'run_policy'):
-      model_state_factory(archetype)
-
-  def test_v24_warp_metadata_is_not_a_policy(self, model_state_factory):
-    for original in ARCHETYPES.values():
-      archetype = deepcopy(original)
-      archetype.metadata_structure['warp_dev'] = 'CPU'
-      state = model_state_factory(archetype)
-      assert state.WARP_DEV == 'CPU'
-      assert state._combined_model_type == archetype.expected_model_type
-      assert 'warp_dev' not in getattr(state, '_policy_keys', [])
-
   def test_asserts_when_no_pkl(self, monkeypatch):
     bundle = DummyBundle(models=[], is_20hz=True)
     monkeypatch.setattr(helpers, 'get_active_bundle', lambda params=None, *, chestnut=None: bundle)
@@ -93,21 +66,6 @@ class TestModelStateCombinedInit(OpenpilotTestCase):
 
 
 class TestStockEquivalence(OpenpilotTestCase):
-
-  def test_split_queue_keys_match_stock(self, model_state_factory):
-    from openpilot.selfdrive.modeld.compile_modeld import make_input_queues
-    from openpilot.sunnypilot.modeld_v2.compile_modeld import derive_frame_skip
-
-    state = model_state_factory(ARCHETYPES['vision_policy_split'])
-
-    frame_skip = derive_frame_skip(SPLIT_VISION_INPUT_SHAPES, SPLIT_POLICY_INPUT_SHAPES)
-    stock_shapes = {**SPLIT_VISION_INPUT_SHAPES, **SPLIT_POLICY_INPUT_SHAPES, 'action_t': (1, 2)}
-    stock_queues, stock_npy, _ = make_input_queues(stock_shapes, frame_skip, device='NPY', frame_copy_size=1)
-
-    assert set(state.input_queues.keys()) - {'tfm', 'big_tfm'} == set(stock_queues.keys())
-    assert {'desire', 'traffic_convention'} <= set(state.numpy_inputs.keys())
-    assert set(state.numpy_inputs.keys()) == set(stock_npy.keys()) - {'action_t', 'prev_feat'}
-
   def test_split_queue_keys_work_with_desire_key(self, model_state_factory):
     from openpilot.sunnypilot.modeld_v2.compile_modeld import derive_frame_skip, make_split_input_queues
 
@@ -132,20 +90,23 @@ class TestStockEquivalence(OpenpilotTestCase):
 
   def test_unified_run_model(self, tmp_path, monkeypatch, patch_modeld):
     from openpilot.common.hardware import hw
-    from openpilot.selfdrive.modeld.helpers import dump_oob
     shapes = {'img': (1, 12, 128, 256), 'big_img': (1, 12, 128, 256), 'features_buffer': (1, 24, 32, 512),
               'desire_pulse': (1, 25, 8), 'traffic_convention': (1, 2), 'action_t': (1, 2)}
-    pkl_data = {'metadata': {'model': {'input_shapes': shapes, 'output_slices': {}}},
-                'run_model': {(CAM_W, CAM_H): tests_helpers._noop_jit}}
-    with open(tmp_path / 'driving_test_tinygrad.pkl', 'wb') as f:
-      dump_oob(pkl_data, f)
+    import codecs
+    import pickle
+    slices_b64 = codecs.encode(pickle.dumps({}), 'base64').decode()
+    pkl_data = {
+      'metadata': {'model': {'input_shapes': shapes, 'output_slices': {}}, 'metadata': {'output_slices': slices_b64},
+                   'input_shapes': shapes, 'output_slices': {}, 'output_shapes': {}},
+      (CAM_W, CAM_H): tests_helpers._noop_jit,
+      'run_policy': tests_helpers._noop_jit,
+    }
+    (tmp_path / 'driving_test_tinygrad.pkl').write_bytes(pickle.dumps(pkl_data))
     bundle = DummyBundle(models=[DummyModel('supercombo', 'driving_test_tinygrad.pkl')])
     patch_modeld(bundle)
     monkeypatch.setattr(hw.Paths, 'model_root', staticmethod(lambda: str(tmp_path)))
     state = ModelState(cam_w=CAM_W, cam_h=CAM_H)
-    assert state.is_run_model and state.run_model is not None
-    assert state.run_policy is None and state.warp is None
-    assert 'img' in state.frame_views and 'big_img' in state.frame_views
+    assert state.adapter.run_policy is not None
 
 
 ARCHETYPE_NAMES = list(ARCHETYPES.keys())
@@ -220,7 +181,7 @@ class TestInputQueueCreation(OpenpilotTestCase):
   def test_queues_not_empty(self, archetype_name, model_state_factory):
     arch = ARCHETYPES[archetype_name]
     state = model_state_factory(arch)
-    assert len(state.input_queues) > 0, f"{arch.name}: input_queues empty"
+    assert len(state.adapter.input_queues) > 0, f"{arch.name}: input_queues empty"
 
   @parameterized.expand(ARCHETYPE_NAMES, names=["archetype_name"])
   def test_npy_contains_transforms(self, archetype_name, model_state_factory):
