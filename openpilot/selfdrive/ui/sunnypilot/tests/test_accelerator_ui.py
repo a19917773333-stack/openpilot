@@ -18,6 +18,7 @@ os.environ.setdefault("SCALE", "1")
 
 from openpilot.common.prefix import OpenpilotPrefix
 from openpilot.common.test import OpenpilotTestCase
+from openpilot.system.ui.lib.multilang import tr
 
 # the window's own params, for whatever it reads while it comes up; every test
 # then runs under its own prefix
@@ -75,6 +76,8 @@ class FakeSM:
     self.board = board
     self.recv_frame = {"modelV2": recv}
     self.alive = {"modelV2": alive}
+    self.seen = {"laneTopologyStateSP": False}
+    self.updated = {"modelV2": False}
     self.big = big
     self.state = state
 
@@ -414,14 +417,14 @@ class TestTiciModelsPanel(UITest):
         return button.text, button.enabled
 
       assert layout.accelerator_link_item.is_visible and layout.refresh_item in layout.items
-      assert shown() == ("REFRESH", True)
+      assert shown() == (tr("REFRESH"), True)
       layout._refresh_models()
       wait_until(lambda: not any(self.params.get(key) for key in MODEL_SYNC_KEYS))
-      assert shown() == ("FETCHING...", False)
+      assert shown() == (tr("FETCHING..."), False)
       self.params.put(MODEL_SYNC_KEYS[0], 2, block=True)
-      assert shown() == ("FETCHING...", False)
+      assert shown() == (tr("FETCHING..."), False)
       self.params.put(MODEL_SYNC_KEYS[1], 2, block=True)
-      assert shown() == ("REFRESH", True)
+      assert shown() == (tr("REFRESH"), True)
 
   def test_the_spinner_watches_the_keys_the_manager_stamps(self):
     from openpilot.selfdrive.ui.sunnypilot.model_info import MODEL_SYNC_KEYS
