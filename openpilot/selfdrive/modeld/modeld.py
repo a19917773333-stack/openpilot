@@ -89,7 +89,7 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
                                 shouldStop=bool(stop))
 
 
-class ChestnutGpuState:
+class ChestnutState:
   # GPU metrics require modeld's GPU context.
   # Keep publishing chestnutState for the slgame UI and chestnutGpuState for
   # the newer upstream model runtime.
