@@ -101,8 +101,9 @@ class DesireHelper:
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
 
     # A navigation lane-change lamp must not look like an intersection turn to
-    # LaneTurnDesire. Turn-only navigation lamps and driver lamps retain the
-    # existing SP behavior.
+    # LaneTurnDesire. A driver lamp alone is also insufficient: without a
+    # matching turn-only navigation request the model must stay in lane-keeping
+    # instead of choosing its own path through an intersection.
     nav_lane_signal_left = bool(
       self._active_nav_signal_direction == "left" and not self._active_nav_signal_turn_only
     )
@@ -115,8 +116,20 @@ class DesireHelper:
     nav_lane_tail_right = bool(
       self._nav_signal_tail_direction == "right" and not self._nav_signal_tail_turn_only
     )
-    lane_turn_left_blinker = bool(carstate.leftBlinker and not (nav_lane_signal_left or nav_lane_tail_left))
-    lane_turn_right_blinker = bool(carstate.rightBlinker and not (nav_lane_signal_right or nav_lane_tail_right))
+    nav_turn_left = bool(
+      (nav_turn_only and nav_direction == "left")
+      or (self._nav_signal_tail_direction == "left" and self._nav_signal_tail_turn_only)
+    )
+    nav_turn_right = bool(
+      (nav_turn_only and nav_direction == "right")
+      or (self._nav_signal_tail_direction == "right" and self._nav_signal_tail_turn_only)
+    )
+    lane_turn_left_blinker = bool(
+      carstate.leftBlinker and nav_turn_left and not (nav_lane_signal_left or nav_lane_tail_left)
+    )
+    lane_turn_right_blinker = bool(
+      carstate.rightBlinker and nav_turn_right and not (nav_lane_signal_right or nav_lane_tail_right)
+    )
 
     # Lane turn controller update
     self.lane_turn_controller.update_lane_turn(blindspot_left=carstate.leftBlindspot, blindspot_right=carstate.rightBlindspot,

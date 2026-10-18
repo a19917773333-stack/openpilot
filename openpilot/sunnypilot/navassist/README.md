@@ -174,7 +174,8 @@ Lane alignment remains an internal preparation state while the crossing or BSM
 gate is blocked. It requests the physical lamp only when one SP lane-change
 attempt can start, then holds that lamp through the existing SP cycle. A
 navigation lane-change lamp is excluded from LaneTurnDesire; only a true
-turn-only request or a driver lamp may create turnLeft/turnRight desire.
+turn-only navigation request may create turnLeft/turnRight desire. A driver
+lamp without a matching navigation request stays in lane-keeping.
 When a new same-direction turn request takes ownership of a still-lit lamp,
 the previous lane-change tail no longer masks that turn from the model. The
 model's original rising-edge desire input is preserved. Entering the existing

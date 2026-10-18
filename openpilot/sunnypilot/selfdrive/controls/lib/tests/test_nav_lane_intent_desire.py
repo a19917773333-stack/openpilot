@@ -128,6 +128,19 @@ def test_navigation_turn_only_lamp_retains_lane_turn_desire():
   assert int(desire.lane_turn_direction) != 0
 
 
+def test_driver_lamp_without_navigation_does_not_plan_turn():
+  desire = helper()
+  desire.lane_turn_controller.enabled = True
+  desire.lane_turn_controller.update_params = lambda: None
+  desire.lane_turn_controller.lane_turn_value = 20.0
+
+  for _ in range(10):
+    desire.update(car_state(vEgo=5.0, leftBlinker=True), True, 1.0)
+
+  assert desire.lane_turn_direction == 0
+  assert desire.desire == 0
+
+
 def test_navigation_lane_target_respects_sp_alc_off():
   desire = helper()
   desire.alc.lane_change_set_timer = AutoLaneChangeMode.OFF
@@ -210,11 +223,12 @@ def test_completed_lane_change_tail_transfers_to_same_direction_turn(direction):
   desire.update(car_state(**lamp_on), True, 0.0, nav_lane_intent=turn_only, **crossing_allowed)
   assert desire.lane_change_state == LaneChangeState.off
 
-  # A later cancellation retains turn-only lamp semantics, and once the lamp
-  # clears an ordinary driver signal still follows SP's original behavior.
+  # A later cancellation retains turn-only lamp semantics. Once the lamp
+  # clears, a driver lamp without a fresh navigation request must not plan a
+  # turn on its own.
   desire.update(car_state(vEgo=5.0, **lamp_on), True, 0.0, nav_lane_intent=stopped)
   assert desire.desire == expected_turn
   desire.update(car_state(vEgo=5.0), True, 0.0)
   assert desire.desire == log.Desire.none
   desire.update(car_state(vEgo=5.0, **lamp_on), True, 0.0)
-  assert desire.desire == expected_turn
+  assert desire.desire == log.Desire.none

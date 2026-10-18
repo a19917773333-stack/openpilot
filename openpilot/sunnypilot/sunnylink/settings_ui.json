@@ -2110,7 +2110,7 @@
               "key": "LaneTurnDesire",
               "widget": "toggle",
               "title": "Use Lane Turn Desires",
-              "description": "If you are driving at 20 mph (32 km/h) or below and have your blinker on, the car will plan a turn in that direction at the nearest drivable path. This prevents situations (like at red lights) where the car might plan the wrong turn direction."
+              "description": "If navigation has an active turn instruction, you are driving at 20 mph (32 km/h) or below, and your blinker is on in the same direction, the car will plan that turn. Without a valid navigation turn request the car stays in lane-keeping instead of choosing a path through the intersection on its own."
             },
             {
               "key": "LaneTurnValue",

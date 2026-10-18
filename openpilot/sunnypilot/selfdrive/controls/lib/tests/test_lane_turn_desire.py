@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from openpilot.cereal import log, custom
 from openpilot.common.params import Params
 from openpilot.common.parameterized import parameterized
@@ -83,6 +85,11 @@ class DummyCarState:
     self.brakePressed = brakePressed
 
 
+def turn_only_intent(direction):
+  return SimpleNamespace(valid=True, signalRequested=True, direction=direction, targetLaneIndex=-1,
+                         spLaneChangeReady=False)
+
+
 def set_lane_turn_params():
   params = Params()
   params.put("LaneTurnDesire", True)
@@ -91,27 +98,37 @@ def set_lane_turn_params():
 
 class TestDesireHelperIntegration(OpenpilotTestCase):
   @parameterized.expand([
-    # Lane turn desire overrides lane change desire
+    # A matching navigation turn request enables the lane turn desire.
     (DummyCarState(vEgo=5, leftBlinker=True, rightBlinker=False, leftBlindspot=False, rightBlindspot=False), True, 1.0,
-     log.Desire.turnLeft),
+     turn_only_intent("left"), log.Desire.turnLeft),
     (DummyCarState(vEgo=7, leftBlinker=False, rightBlinker=True, leftBlindspot=False, rightBlindspot=False), True, 1.0,
-     log.Desire.turnRight),
+     turn_only_intent("right"), log.Desire.turnRight),
     # Lane change desire only (no turn desires)
     (DummyCarState(vEgo=9, leftBlinker=True, rightBlinker=False, leftBlindspot=False, rightBlindspot=False,
-                   steeringPressed=True, steeringTorque=1), True, 1.0, log.Desire.laneChangeLeft),
+                   steeringPressed=True, steeringTorque=1), True, 1.0, None, log.Desire.laneChangeLeft),
     (DummyCarState(vEgo=9, leftBlinker=False, rightBlinker=True, leftBlindspot=False, rightBlindspot=False,
-                   steeringPressed=True, steeringTorque=-1), True, 1.0, log.Desire.laneChangeRight),
+                   steeringPressed=True, steeringTorque=-1), True, 1.0, None, log.Desire.laneChangeRight),
     # No desire (inactive)
-    (DummyCarState(vEgo=9, leftBlinker=False, rightBlinker=False), False, 1.0, log.Desire.none),
-    (DummyCarState(vEgo=4, leftBlinker=False, rightBlinker=False), True, 1.0, log.Desire.none),  # No blinkers? no desire!
-  ], names=["carstate", "lateral_active", "lane_change_prob", "expected_desire"])
-  def test_desire_helper_integration(self, carstate, lateral_active, lane_change_prob, expected_desire, set_lane_turn_params):
+    (DummyCarState(vEgo=9, leftBlinker=False, rightBlinker=False), False, 1.0, None, log.Desire.none),
+    (DummyCarState(vEgo=4, leftBlinker=False, rightBlinker=False), True, 1.0, None, log.Desire.none),  # No blinkers? no desire!
+  ], names=["carstate", "lateral_active", "lane_change_prob", "nav_lane_intent", "expected_desire"])
+  def test_desire_helper_integration(self, carstate, lateral_active, lane_change_prob, nav_lane_intent,
+                                     expected_desire, set_lane_turn_params):
     dh = DesireHelper()
     dh.alc.lane_change_set_timer = AutoLaneChangeMode.NUDGE
     for _ in range(10):
       dh.update(carstate, lateral_active, lane_change_prob,
-                left_edge_detected=False, right_edge_detected=False)
+                left_edge_detected=False, right_edge_detected=False, nav_lane_intent=nav_lane_intent)
     assert dh.desire == expected_desire
+
+  def test_driver_lamp_without_navigation_keeps_lane_keeping(self, set_lane_turn_params):
+    dh = DesireHelper()
+    dh.alc.lane_change_set_timer = AutoLaneChangeMode.NUDGE
+    carstate = DummyCarState(vEgo=5, leftBlinker=True)
+    for _ in range(10):
+      dh.update(carstate, True, 1.0, left_edge_detected=False, right_edge_detected=False)
+    assert dh.lane_turn_direction == TurnDirection.none
+    assert dh.desire == log.Desire.none
 
   def test_edge_blocks_lane_change(self, set_lane_turn_params):
     dh = DesireHelper()
