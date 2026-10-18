@@ -266,10 +266,12 @@ class ModelManagerSP:
 
   async def _download_bundle(self, model_bundle: custom.ModelManagerSP.ModelBundle, destination_path: str, source: str) -> None:
     self.selected_bundle = model_bundle
-    self.selected_bundle.status = custom.ModelManagerSP.DownloadStatus.downloading
-    for model in self.selected_bundle.models:
-      model.artifact.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.downloading
-    self._report_status()
+    models = [] if source == "chestnut" and not self.chestnut_present else self.selected_bundle.models
+    if models:
+      self.selected_bundle.status = custom.ModelManagerSP.DownloadStatus.downloading
+      for model in models:
+        model.artifact.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.downloading
+      self._report_status()
     os.makedirs(destination_path, exist_ok=True)
 
     try:

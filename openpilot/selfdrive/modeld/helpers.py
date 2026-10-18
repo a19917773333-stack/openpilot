@@ -32,6 +32,8 @@ def load_oob(path, chestnut=False):
       buffers.view(n, offset).ensure_allocated().copy_from(Buffer("PYTHON", n, initial_value=piece[:n]))
     return type("_Unpickler", (pickle.Unpickler,), {"persistent_load": lambda self, pid: buffers.view(*pid)})(io.BytesIO(opcodes)).load()
 
+MODELD_PKL_KEYS = ('metadata', 'input_devices', 'run_model')
+
 def chestnut_present() -> bool:
   for d in USB_DEVICES_PATH.glob("*"):
     try:

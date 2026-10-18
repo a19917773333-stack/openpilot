@@ -11,7 +11,7 @@ from collections import namedtuple
 
 import numpy as np
 
-from openpilot.selfdrive.modeld.helpers import dump_oob, load_oob
+from openpilot.selfdrive.modeld.helpers import MODELD_PKL_KEYS, dump_oob, load_oob
 
 def _patch_tinygrad_fetch_fw():
   import hashlib
@@ -28,6 +28,19 @@ def _patch_tinygrad_fetch_fw():
     return _orig(path, name, sha256)
   helpers.fetch_fw = fetch_fw
 _patch_tinygrad_fetch_fw()
+
+
+def _patch_tinygrad_buffer():
+  import inspect
+  from tinygrad.device import Buffer
+  sig = inspect.signature(Buffer.as_memoryview)
+  if 'force_zero_copy' not in sig.parameters:
+    orig = Buffer.as_memoryview
+    def as_memoryview(self, allow_zero_copy=False, force_zero_copy=False, no_sync=False):
+      return orig(self, allow_zero_copy=allow_zero_copy or force_zero_copy)
+    Buffer.as_memoryview = as_memoryview
+_patch_tinygrad_buffer()
+
 
 
 from tinygrad.tensor import Tensor
@@ -314,6 +327,7 @@ if __name__ == "__main__":
     'input_devices': {'model': Device.DEFAULT},
     'run_model': {},
   }
+  assert set(out) == set(MODELD_PKL_KEYS), "modeld reads MODELD_PKL_KEYS, keep it in step"
 
   run_policy = make_run_policy(model_runner, out['metadata'], args.frame_skip)
 
