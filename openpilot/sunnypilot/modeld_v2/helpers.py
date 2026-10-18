@@ -261,10 +261,9 @@ def _allocate_buffers(header: dict, blob: memoryview, device_map: dict | None, s
     spans = [(entry["init"], entry["nbytes"], key) for (_, _, entry), key in zip(entries, keys, strict=True)
              if isinstance(key, tuple) and key[0] == device and key not in shared]
     files = getattr(blob, "starts", [0])  # a part read from several files (frame_fusion's) is uploaded a block per file
-    groups = list(itertools.groupby(sorted(spans, key=lambda span: span[0][0]),
-                                    key=lambda span: bisect.bisect_right(files, span[0][0])))
+    groups = [(key, list(group)) for key, group in itertools.groupby(
+      sorted(spans, key=lambda span: span[0][0]), key=lambda span: bisect.bisect_right(files, span[0][0]))]
     for group_index, (_, group) in enumerate(groups, 1):
-      group = list(group)
       start, end = min(span[0] for span, _, _ in group), max(span[1] for span, _, _ in group)
       _upload(block := Buffer(device, end - start).ensure_allocated(), blob[start:end])
       shared |= {key: block.view(nbytes, span[0] - start).ensure_allocated() for span, nbytes, key in group}
