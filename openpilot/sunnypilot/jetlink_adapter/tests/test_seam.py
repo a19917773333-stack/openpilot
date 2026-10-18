@@ -48,8 +48,9 @@ HARDWARED = OPENPILOT / 'system' / 'hardware' / 'hardwared.py'
 BASELINE = 'develop'
 
 # everything modeld may call on the adapter: prepare() before the process goes
-# realtime, attach() once the camera is up, in_control() onto the model before
-# every frame. A name added here without a plan entry is a widened seam
+# realtime, attach() once the camera is up, in_control() recorded for the
+# adapter before every frame. A name added here without a plan entry is a
+# widened seam
 HOOKS = {'prepare', 'attach', 'in_control'}
 ADAPTER = 'jetlink_adapter'
 
@@ -369,7 +370,7 @@ class Footprint:
                      f"expected prepare, attach and in_control and nothing else:\n{detail}")
     # the decision and the load; the acceleratorState line reads the model
     self.assertGreater(calls[1][0] - calls[0][0], 8, f"one hunk where two were expected:\n{detail}")
-    # and in_control once a frame, onto the model, as frame_drop_ratio is
+    # and in_control once a frame, recorded for the adapter as frame_drop_ratio is
     loop = _frame_loop(self.body)
     self.assertEqual(sorted(attr for s in loop for _, attr in _calls(s)), ['in_control'])
 

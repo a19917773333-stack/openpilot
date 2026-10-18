@@ -32,7 +32,7 @@ from pathlib import Path
 
 # the version of jetlink.openpilot's API this adapter is written to; any other
 # is treated as jetlink being absent, with the reason as the offroad alert
-API = 2
+API = 3
 
 # the gadget owner, as manager names the process and selfdrived lists it
 OWNER = 'jetlinkd'
@@ -55,16 +55,15 @@ KEYS = _Keys(link='JetlinkLink', offroad='IsOffroad', progress='AcceleratorProgr
 # hardware package is too heavy for the owner, so they are written out here
 CHESTNUT_IDS = frozenset({(0xADD1, 0x0001), (0xADD1, 0x0002), (0x3801, 0x0001), (0x174C, 0x2464), (0x174C, 0x2463)})
 
-# where the build puts the warp for each camera (SConscript) and modeld loads
-# it from: in the fork's tree, never in the jetlink submodule (a file there
-# leaves it dirty for the updater), and under the *.pkl ignore, which the
-# release scripts add past. Not Paths.comma_home(), which on AGNOS is a tmpfs
-# overlay: the pickle was gone every boot
-WARP_DIR = Path(__file__).resolve().parent / 'models'
-
 OWNER_LOG = Path('/data/log/jetlink-owner.log')
 
 _AGNOS = os.path.isfile('/AGNOS')
+
+# modeld writes this on its frame thread before every run(); jetlink's joining
+# model then asks Adapter.in_control() for it. API 3 moved the question from
+# an attribute on the model to the adapter, so keep the answer here. True until
+# modeld says otherwise: a swap on no information must never happen.
+_in_control = True
 
 
 def _params_dir() -> Path:
@@ -80,8 +79,10 @@ def _params_dir() -> Path:
 
 
 def warp_path(cam_w: int, cam_h: int, model_w: int, model_h: int) -> Path:
-  """The warp for one geometry: the build's target and what modeld opens."""
-  return WARP_DIR / f'warp_{cam_w}x{cam_h}_{model_w}x{model_h}_tinygrad.pkl'
+  """modeld's driving warp for one camera: the same build product modeld
+  loads, which jetlink's Warps.load runs on the comma."""
+  from openpilot.selfdrive.modeld.helpers import MODELS_DIR
+  return MODELS_DIR / f'driving_warp_{cam_w}x{cam_h}_tinygrad.pkl'
 
 
 def owner_config():
@@ -103,7 +104,7 @@ def main() -> None:
 
 def adapter() -> Adapter:
   """The adapter, for jetlink's entry points that run as their own process:
-  the provisioning run and the warp build."""
+  the provisioning run."""
   return Adapter()
 
 
@@ -196,17 +197,14 @@ class Adapter:
                      constants=V2ModelConstants, lat_smooth_seconds=LAT_SMOOTH_SECONDS,
                      long_smooth_seconds=LONG_SMOOTH_SECONDS, get_action_from_model=get_action_from_model)
 
+  def in_control(self) -> bool:
+    """Openpilot or MADS in control, as modeld last recorded it on this frame's
+    thread. jetlink's joining model asks this before every frame and swaps the
+    large model in only while false; True when modeld has not said yet."""
+    return _in_control
+
   def event(self, name: str, **fields) -> None:
     self.log.event(name, **fields)
-
-  # -- the build --------------------------------------------------------------
-
-  def make_warp(self, cam_w: int, cam_h: int, model_w: int, model_h: int):
-    # compile_modeld first: it patches tinygrad's firmware fetch as it loads
-    from openpilot.selfdrive.modeld.compile_modeld import NV12Frame, make_warp
-    from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
-    nv12 = NV12Frame(cam_w, cam_h, *get_nv12_info(cam_w, cam_h))
-    return make_warp(nv12, model_w, model_h), nv12.size
 
 
 # -- what the hooks call ------------------------------------------------------
@@ -373,16 +371,20 @@ IN_CONTROL = ('carState', 'carControl', 'carControlSP')
 
 @_guarded(True)
 def in_control(sm) -> bool:
-  """modeld, before every frame, onto the model: is openpilot or MADS in
-  control? jetlink's large model swaps in only while it is not. selfdrived's
-  own answer (enabled or mads.enabled, what accelerator_events is handed),
-  as controlsd republishes it, read off modeld's SubMaster. MADS counts with
-  its lateral paused (a stop, a blinker, the brake): it steers again on its
-  own. A service late or invalid counts as in control; without carState a
-  card that died would have the swap land on stale controls."""
+  """modeld, before every frame, records what the adapter answers jetlink:
+  is openpilot or MADS in control? jetlink's large model swaps in only while
+  it is not. selfdrived's own answer (enabled or mads.enabled, what
+  accelerator_events is handed), as controlsd republishes it, read off
+  modeld's SubMaster. MADS counts with its lateral paused (a stop, a blinker,
+  the brake): it steers again on its own. A service late or invalid counts as
+  in control; without carState a card that died would have the swap land on
+  stale controls."""
+  global _in_control
+  _in_control = True
   if not (sm.all_alive(IN_CONTROL) and sm.all_valid(IN_CONTROL)):
     return True
-  return bool(sm['carControl'].enabled or sm['carControlSP'].mads.enabled)
+  _in_control = bool(sm['carControl'].enabled or sm['carControlSP'].mads.enabled)
+  return _in_control
 
 
 @_guarded(None)

@@ -227,7 +227,7 @@ class RefreshTest(JetlinkTest):
       mock.patch('jetlink.registry.catalog.fetch_catalogs', side_effect=self.probe),
       *chestnut(self.CHESTNUT),
       # a warp built for this camera, so readiness is the pick's engine alone
-      mock.patch.object(jetlink_adapter, 'WARP_DIR', warps),
+      mock.patch('openpilot.selfdrive.modeld.helpers.MODELS_DIR', warps),
     ):
       patcher.start()
       self.addCleanup(patcher.stop)

@@ -148,10 +148,11 @@ class TestTheDevice(OpenpilotTestCase):
         self.assertEqual(Adapter().camera(), (camera.width, camera.height, *MEDMODEL_INPUT_SIZE))
 
   def test_the_warp_is_where_the_build_puts_it(self):
-    # the SConscript's targets are jetlink_adapter.warp_path (test_warp_build)
+    # modeld's build makes it, and jetlink runs that same pickle
+    from openpilot.selfdrive.modeld.helpers import MODELS_DIR
     geometry = (1928, 1208, 512, 256)
     self.assertEqual(Adapter().warp_path(*geometry), jetlink_adapter.warp_path(*geometry))
-    self.assertEqual(jetlink_adapter.warp_path(*geometry).parent, Path(jetlink_adapter.__file__).parent / 'models')
+    self.assertEqual(jetlink_adapter.warp_path(*geometry), MODELS_DIR / 'driving_warp_1928x1208_tinygrad.pkl')
 
 
 class TestModeld(OpenpilotTestCase):
@@ -181,56 +182,32 @@ class TestModeld(OpenpilotTestCase):
       for check in (sm.alive, sm.valid):
         healthy()
         self.assertFalse(jetlink_adapter.in_control(sm))
+        self.assertFalse(Adapter().in_control())
         check[failed] = False
         self.assertTrue(jetlink_adapter.in_control(sm), failed)
+        self.assertTrue(Adapter().in_control(), failed)
     healthy()
     sm['carControl'].enabled = True
     self.assertTrue(jetlink_adapter.in_control(sm))
+    self.assertTrue(Adapter().in_control())
     sm['carControl'].enabled = False
     # MADS engaged with its lateral paused (a stop, a blinker, the brake):
     # nothing steers, but MADS does again on its own, so no swap
     sm['carControlSP'].mads.enabled = True
     self.assertTrue(jetlink_adapter.in_control(sm))
+    self.assertTrue(Adapter().in_control())
     sm['carControlSP'].mads.enabled = False
     self.assertFalse(jetlink_adapter.in_control(sm))
+    self.assertFalse(Adapter().in_control())
     # a rule that fails on the frame thread holds the swap off, never modeld
     self.assertIs(jetlink_adapter.in_control(None), True)
+    self.assertIs(Adapter().in_control(), True)
 
   def test_telemetry_is_a_cloudlog_event(self):
     op = Adapter()
     with mock.patch.object(op.log, 'event') as event:
       op.event('jetlinkTelemetry', dead=False, rtt_ms=3.0)
     event.assert_called_once_with('jetlinkTelemetry', dead=False, rtt_ms=3.0)
-
-
-class TestTheBuild(OpenpilotTestCase):
-  def test_the_warp_graph_comes_before_tinygrad(self):
-    # compile_modeld patches tinygrad's firmware fetch as it loads, and the
-    # warp build makes the adapter before it asks for the graph
-    code = '''
-import json, sys
-from openpilot.sunnypilot import jetlink_adapter
-op = jetlink_adapter.adapter()
-built = 'tinygrad' in sys.modules
-seen = []
-class Order:
-  def find_spec(self, name, path=None, target=None):
-    seen.append(name)
-    return None
-sys.meta_path.insert(0, Order())
-graph, size = op.make_warp(1928, 1208, 512, 256)
-from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
-print(json.dumps({'built': built, 'seen': seen, 'callable': callable(graph), 'size': size == get_nv12_info(1928, 1208)[3]}))
-'''
-    out = run_fresh(code)
-    self.assertEqual(out.returncode, 0, out.stderr)
-    found = json.loads(out.stdout.strip().splitlines()[-1])
-    self.assertFalse(found['built'], "making the adapter imported tinygrad")
-    self.assertTrue(found['callable'] and found['size'])
-    seen = found['seen']
-    self.assertIn('openpilot.selfdrive.modeld.compile_modeld', seen)
-    first_tinygrad = next(i for i, name in enumerate(seen) if name.split('.')[0] == 'tinygrad')
-    self.assertLess(seen.index('openpilot.selfdrive.modeld.compile_modeld'), first_tinygrad)
 
 
 class TestTheOwner(OpenpilotTestCase):
@@ -450,7 +427,7 @@ assert a.model_state('f' * 40) is None
 
   def test_another_api_turns_the_link_off_and_says_why(self):
     params = Params()
-    for api, name, why in ((1, 'API', "jetlink package API 1, this build expects 2"),
+    for api, name, why in ((1, 'API', "jetlink package API 1, this build expects 3"),
                            (None, 'openpilot', "jetlink package too old for this build")):
       if name == 'API':
         patch = mock.patch.object(jl, 'API', api)

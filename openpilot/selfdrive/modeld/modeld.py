@@ -450,7 +450,8 @@ def main(demo=False):
       'action_t': np.array([lat_action_t, long_action_t], dtype=np.float32),
     }
 
-    # Jetlink uses control state and dropped-frame share to decide safe handovers.
+    # Jetlink's joining model asks Adapter.in_control() on this frame thread;
+    # record this frame's answer for it, as the dropped-frame share is recorded.
     model.in_control = jetlink_adapter.in_control(sm)
     model.frame_drop_ratio = frame_drop_ratio
     handovers = getattr(model, 'handovers', 0)
