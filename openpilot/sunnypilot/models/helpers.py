@@ -6,6 +6,7 @@ See the LICENSE.md file in the root directory for more details.
 """
 
 import hashlib
+import os
 from pathlib import Path
 import numpy as np
 
