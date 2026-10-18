@@ -1,6 +1,7 @@
 import importlib
 import os
 import signal
+import sys
 import time
 import subprocess
 from collections.abc import Callable, ValuesView
@@ -283,7 +284,7 @@ class DaemonProcess(ManagerProcess):
         pass
 
     cloudlog.info(f"starting daemon {self.name}")
-    proc = subprocess.Popen(['python', '-m', self.module],
+    proc = subprocess.Popen([sys.executable, '-m', self.module],
                                stdin=open('/dev/null'),
                                stdout=open('/dev/null', 'w'),
                                stderr=open('/dev/null', 'w'),

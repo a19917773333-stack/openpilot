@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 
+# C3XL AGNOS keeps Python and scons in a venv that is not on the login PATH.
+# Make a fresh checkout launchable without relying on a hand-written continue.sh.
+if [ -d /usr/local/venv/bin ]; then
+  case ":$PATH:" in
+    *":/usr/local/venv/bin:"*) ;;
+    *) export PATH="/usr/local/venv/bin:$PATH" ;;
+  esac
+fi
+
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
