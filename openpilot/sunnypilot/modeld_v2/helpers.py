@@ -131,9 +131,12 @@ def load_model(path: str, device_map: dict | None = None, verify: bool = True, c
     return extras | cached
   shared: dict = {}
   jits: dict = {}
+  total = max(1, len(parts))
   for index, (key, (header, blob)) in enumerate(parts.items()):
-    jits[key] = PlainJit(header, blob, device_map, verify, shared)
-    report(0.05 + 0.85 * (index + 1) / max(1, len(parts)))
+    def report_part(value: float, index: int = index) -> None:
+      report(0.05 + 0.85 * (index + value) / total)
+    jits[key] = PlainJit(header, blob, device_map, verify, shared, progress_callback=report_part)
+    report(0.05 + 0.85 * (index + 1) / total)
   if cache:
     _write_cache(path, jits, device_map, extra)
   report(1.0)
@@ -239,7 +242,12 @@ def _upload(buffer, data: memoryview, chunk: int = 16 << 20) -> None:
     buffer.view(chunk, offset).ensure_allocated().copy_from(source.view(chunk, offset).ensure_allocated())
 
 
-def _allocate_buffers(header: dict, blob: memoryview, device_map: dict | None, shared: dict) -> list:
+def _allocate_buffers(header: dict, blob: memoryview, device_map: dict | None, shared: dict,
+                      progress_callback=None) -> list:
+  def report(progress: float) -> None:
+    if progress_callback is not None:
+      progress_callback(progress)
+
   import numpy as np
   from tinygrad.device import Buffer
   written = {call["args"][i]["buffer"] for call in header["calls"] for i in (call["outs"] if call["kind"] == "program" else (0,))
@@ -253,16 +261,20 @@ def _allocate_buffers(header: dict, blob: memoryview, device_map: dict | None, s
     spans = [(entry["init"], entry["nbytes"], key) for (_, _, entry), key in zip(entries, keys, strict=True)
              if isinstance(key, tuple) and key[0] == device and key not in shared]
     files = getattr(blob, "starts", [0])  # a part read from several files (frame_fusion's) is uploaded a block per file
-    for _, group in itertools.groupby(sorted(spans, key=lambda span: span[0][0]), key=lambda span: bisect.bisect_right(files, span[0][0])):
+    groups = list(itertools.groupby(sorted(spans, key=lambda span: span[0][0]),
+                                    key=lambda span: bisect.bisect_right(files, span[0][0])))
+    for group_index, (_, group) in enumerate(groups, 1):
       group = list(group)
       start, end = min(span[0] for span, _, _ in group), max(span[1] for span, _, _ in group)
       _upload(block := Buffer(device, end - start).ensure_allocated(), blob[start:end])
       shared |= {key: block.view(nbytes, span[0] - start).ensure_allocated() for span, nbytes, key in group}
+      report(0.7 * group_index / len(groups))
   buffers = []
-  for (device, data, entry), key in zip(entries, keys, strict=True):
+  for index, ((device, data, entry), key) in enumerate(zip(entries, keys, strict=True), 1):
     if key not in shared:
       shared[key] = Buffer(device, entry["nbytes"], initial_value=pickle.PickleBuffer(data) if data else None).ensure_allocated()
     buffers.append(shared[key])
+    report(0.7 + 0.3 * index / max(1, len(entries)))
   return buffers
 
 
@@ -293,7 +305,12 @@ class _Jit:
 
 
 class PlainJit(_Jit):
-  def __init__(self, header: dict, blob: memoryview, device_map: dict | None = None, verify: bool = True, shared: dict | None = None):
+  def __init__(self, header: dict, blob: memoryview, device_map: dict | None = None, verify: bool = True,
+               shared: dict | None = None, progress_callback=None):
+    def report(progress: float) -> None:
+      if progress_callback is not None:
+        progress_callback(progress)
+
     import numpy as np
     import tinygrad.engine.jit as jit
     from tinygrad import Tensor
@@ -302,7 +319,8 @@ class PlainJit(_Jit):
     from tinygrad.uop.ops import Ops, UOp
 
     inputs = {spec["slot"]: spec for spec in header["inputs"]}
-    buffers = _allocate_buffers(header, blob, device_map, {} if shared is None else shared)
+    buffers = _allocate_buffers(header, blob, device_map, {} if shared is None else shared,
+                                progress_callback=lambda value: report(0.5 * value))
     bases = [UOp.from_buffer(buffer, _dtype(entry["dtype"])) for buffer, entry in zip(buffers, header["buffers"], strict=True)]
 
     def argument(described: dict):
@@ -315,23 +333,29 @@ class PlainJit(_Jit):
       return (base if base.dtype.itemsize == 1 else base.bitcast(dtypes.uint8)).shrink(((offset, offset + nbytes),)).bitcast(dtype)
 
     calls = []
-    for call in header["calls"]:
+    calls_total = max(1, len(header["calls"]))
+    for call_index, call in enumerate(header["calls"], 1):
       arguments = [argument(described) for described in call["args"]]
       if call["kind"] == "program":
         calls.append(_program_uop(call, bytes(blob[slice(*call["lib"])])).call(*arguments))
       else:
         calls.append(arguments[0].store_call(arguments[1]))
+      if call_index % 64 == 0:
+        report(0.5 + 0.15 * call_index / calls_total)
+    report(0.65)
     # stand-ins for JIT inputs: copy staging to GPU is decided from the input buffers, the real ones bind per call
     stand_ins = {slot: UOp.from_buffer(Buffer(_device(spec["device"], device_map), spec["numel"] * _dtype(spec["dtype"]).itemsize).ensure_allocated(),
                                        _dtype(spec["dtype"])) for slot, spec in inputs.items()}
     input_uops = tuple(stand_ins.get(slot, next(iter(stand_ins.values()), None)) for slot in range(max(stand_ins, default=-1) + 1))
     linear = jit.compile_linear(UOp(Ops.LINEAR, src=tuple(calls)), beam=0, input_uops=input_uops, cache=False)
+    report(0.9)
 
     returned = [Tensor(argument(t)).reshape(tuple(t["shape"])) for t in header["returns"]["tensors"]]
     ret = {"NoneType": None, "Tensor": returned[0] if returned else None, "tuple": tuple(returned), "list": returned}[header["returns"]["kind"]]
     super().__init__(jit.CapturedJit(ret, linear, header["input_names"], []), header["input_names"], buffers)
 
     if not verify or not (check := header.get("check")):
+      report(1.0)
       return
     def array(stored):
       return np.frombuffer(blob[slice(*stored["data"])], dtype=np.dtype(stored["dtype"])).reshape(stored["shape"]).copy()
@@ -345,3 +369,4 @@ class PlainJit(_Jit):
       expected = array(stored)
       if got.shape != expected.shape or not np.allclose(got, expected, rtol=1e-3, atol=1e-3, equal_nan=True):
         raise ArtifactMismatch(f"output {index} differs from the compile-time reference frame; recompile the model")
+    report(1.0)
