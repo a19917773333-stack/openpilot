@@ -67,7 +67,7 @@ class TeslaSettings(BrandSettings):
       f"{tr('Use a multi-finger press on the infotainment screen to toggle MADS.')} " +
       f"{tr('This allows the use of full MADS functionality when enabled.')}<br><br>" +
       f"{tr('Selecting a higher finger count may reduce accidental activations.')}<br><br>" +
-      f"<b>{tr('Note: Setting this to Off will reset your MADS settings to default.')}</b>"
+      f"<b>{tr('Note: Setting this to Off limits MADS to Disengage mode.')}</b>"
     )
     if not ui_state.is_offroad():
       mads_screen_button_disabled_msg = tr("Enable \"Always Offroad\" in Device panel, or turn vehicle off to change.")

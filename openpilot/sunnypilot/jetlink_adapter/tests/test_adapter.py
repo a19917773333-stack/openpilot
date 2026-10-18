@@ -140,9 +140,10 @@ class TestTheDevice(OpenpilotTestCase):
 
   def test_the_camera_is_the_one_modelds_build_picks(self):
     from openpilot.common.hardware import HARDWARE
-    from openpilot.common.transformations.camera import _ar_ox_fisheye, _os_fisheye
+    from openpilot.common.transformations.camera import DEVICE_CAMERAS
     from openpilot.common.transformations.model import MEDMODEL_INPUT_SIZE
-    for device, camera in (('tici', _ar_ox_fisheye), ('tizi', _ar_ox_fisheye), ('mici', _os_fisheye)):
+    for device, sensor in (('tici', 'ox03c10'), ('tizi', 'ox03c10'), ('mici', 'os04c10')):
+      camera = DEVICE_CAMERAS[(device, sensor)].wide_road
       with mock.patch.object(HARDWARE, 'get_device_type', return_value=device):
         self.assertEqual(Adapter().camera(), (camera.width, camera.height, *MEDMODEL_INPUT_SIZE))
 

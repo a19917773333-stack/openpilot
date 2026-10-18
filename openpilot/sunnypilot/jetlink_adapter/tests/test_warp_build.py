@@ -22,6 +22,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest import mock
 
 from openpilot.common.basedir import BASEDIR
@@ -30,6 +31,9 @@ from openpilot.common.transformations.camera import _ar_ox_fisheye, _os_fisheye
 from openpilot.sunnypilot import jetlink_adapter
 
 SCONSCRIPT = Path(BASEDIR) / 'openpilot' / 'sunnypilot' / 'jetlink_adapter' / 'SConscript'
+MODEL_SCONSCRIPT = Path(BASEDIR) / 'openpilot' / 'selfdrive' / 'modeld' / 'SConscript'
+PREBUILT_WORKFLOW = Path(BASEDIR) / '.github' / 'workflows' / 'sunnypilot-build-prebuilt.yaml'
+BUILD_RELEASE = Path(BASEDIR) / 'tools' / 'release' / 'build_release.sh'
 MODEL = (512, 256)
 CAMERAS = [(c.width, c.height) for c in (_ar_ox_fisheye, _os_fisheye)]
 
@@ -94,6 +98,33 @@ def run_sconscript(camera_configs=CAMERAS, prebuilt: bool = False, arch: str = '
     return {target: (cmd, cmd_env) for target, cmd, cmd_env in env.commands}
 
 
+def model_camera_configs(device_type: str, *, prebuilt: bool = False) -> list[tuple[int, int]]:
+  """Evaluate modeld's camera selection without declaring its build targets."""
+  source, separator, _ = MODEL_SCONSCRIPT.read_text().partition('\n\nCHESTNUT = chestnut_present()')
+  if not separator:
+    raise AssertionError("modeld SConscript camera selection boundary is missing")
+
+  with tempfile.TemporaryDirectory() as checkout:
+    (Path(checkout) / 'tinygrad_repo').mkdir()
+    env = FakeEnv(checkout, 'the/build/path')
+    script = types.ModuleType('SCons.Script')
+    script.Action = lambda cmd, msg=None: cmd
+    script.Value = lambda value: value
+    scons = types.ModuleType('SCons')
+    scons.Script = script
+    namespace = {'Import': lambda *names: None, 'Export': lambda *names: None,
+                 'File': env.Dir, 'Dir': env.Dir, 'env': env, 'arch': 'comma_arm64'}
+
+    from openpilot.common.hardware import HARDWARE
+    with mock.patch.dict(sys.modules, {'SCons': scons, 'SCons.Script': script}), \
+         mock.patch.object(HARDWARE, 'get_device_type', return_value=device_type), mock.patch.dict(os.environ):
+      os.environ.pop('PREBUILT_ALL_CAMERAS', None)
+      if prebuilt:
+        os.environ['PREBUILT_ALL_CAMERAS'] = '1'
+      exec(compile(source, str(MODEL_SCONSCRIPT), 'exec'), namespace)
+    return cast(list[tuple[int, int]], namespace['camera_configs'])
+
+
 class TestWarpTargets(OpenpilotTestCase):
   def test_every_camera_modeld_builds_for_gets_a_warp_where_modeld_opens_it(self):
     targets = run_sconscript()
@@ -127,6 +158,10 @@ class TestWarpTargets(OpenpilotTestCase):
     for cmd, _ in run_sconscript(prebuilt=True).values():
       self.assertFalse(cmd.startswith('-'), cmd)
 
+  def test_a_release_requires_every_supported_camera(self):
+    with self.assertRaisesRegex(RuntimeError, "every supported camera geometry"):
+      run_sconscript(CAMERAS[:1], prebuilt=True)
+
   def test_nothing_is_built_off_the_comma(self):
     self.assertEqual(run_sconscript(arch='Darwin'), {})
 
@@ -134,6 +169,34 @@ class TestWarpTargets(OpenpilotTestCase):
     # an empty jetlink_repo, or one from before jetlink.openpilot: a missing
     # source would fail the whole build, not just the warp
     self.assertEqual(run_sconscript(capture=False), {})
+
+
+class TestPrebuiltBuildChain(OpenpilotTestCase):
+  def test_source_build_uses_each_devices_runtime_camera(self):
+    from openpilot.common.transformations.camera import DEVICE_CAMERAS
+    for device, sensor in (('tici', 'ox03c10'), ('tizi', 'ox03c10'), ('mici', 'os04c10')):
+      self.assertEqual(model_camera_configs(device), [DEVICE_CAMERAS[(device, sensor)].wide_road.size])
+
+  def test_source_build_and_adapter_use_c3xl_ife_camera(self):
+    from openpilot.common.hardware import HARDWARE
+    from openpilot.common.transformations.camera import CameraConfig, DEVICE_CAMERAS, DeviceCameraConfig
+    road = CameraConfig(1344, 760, 1.0)
+    original = DEVICE_CAMERAS[('tici', 'ox03c10')]
+    c3xl = DeviceCameraConfig(road, original.cabin, road)
+    with mock.patch.dict(DEVICE_CAMERAS, {('tici', 'ox03c10'): c3xl}), \
+         mock.patch.object(HARDWARE, 'get_device_type', return_value='tici'):
+      camera_configs = model_camera_configs('tici')
+      self.assertEqual(camera_configs, [road.size])
+      self.assertEqual(jetlink_adapter.Adapter().camera(), (*road.size, *MODEL))
+      warp = jetlink_adapter.warp_path(road.width, road.height, MODEL[0], MODEL[1])
+      self.assertEqual(set(run_sconscript(camera_configs)), {str(warp)})
+
+  def test_release_builds_request_all_camera_geometries(self):
+    selector = "camera_configs = all_camera_configs if os.getenv('PREBUILT_ALL_CAMERAS')"
+    self.assertIn(selector, MODEL_SCONSCRIPT.read_text())
+    self.assertEqual(set(model_camera_configs('tici', prebuilt=True)), set(CAMERAS))
+    for build_entrypoint in (PREBUILT_WORKFLOW, BUILD_RELEASE):
+      self.assertIn("export PREBUILT_ALL_CAMERAS=1", build_entrypoint.read_text())
 
 
 class TestTheCommandBuilds(OpenpilotTestCase):

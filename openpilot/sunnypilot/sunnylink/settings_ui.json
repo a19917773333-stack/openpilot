@@ -66,12 +66,22 @@
                                 "equals": "tesla"
                               },
                               {
-                                "type": "not",
-                                "condition": {
-                                  "type": "capability",
-                                  "field": "tesla_has_vehicle_bus",
-                                  "equals": true
-                                }
+                                "type": "any",
+                                "conditions": [
+                                  {
+                                    "type": "not",
+                                    "condition": {
+                                      "type": "capability",
+                                      "field": "tesla_has_vehicle_bus",
+                                      "equals": true
+                                    }
+                                  },
+                                  {
+                                    "type": "param",
+                                    "key": "TeslaMadsScreenButton",
+                                    "equals": 0
+                                  }
+                                ]
                               }
                             ]
                           }
@@ -108,12 +118,22 @@
                                 "equals": "tesla"
                               },
                               {
-                                "type": "not",
-                                "condition": {
-                                  "type": "capability",
-                                  "field": "tesla_has_vehicle_bus",
-                                  "equals": true
-                                }
+                                "type": "any",
+                                "conditions": [
+                                  {
+                                    "type": "not",
+                                    "condition": {
+                                      "type": "capability",
+                                      "field": "tesla_has_vehicle_bus",
+                                      "equals": true
+                                    }
+                                  },
+                                  {
+                                    "type": "param",
+                                    "key": "TeslaMadsScreenButton",
+                                    "equals": 0
+                                  }
+                                ]
                               }
                             ]
                           }
@@ -151,12 +171,22 @@
                                     "equals": "tesla"
                                   },
                                   {
-                                    "type": "not",
-                                    "condition": {
-                                      "type": "capability",
-                                      "field": "tesla_has_vehicle_bus",
-                                      "equals": true
-                                    }
+                                    "type": "any",
+                                    "conditions": [
+                                      {
+                                        "type": "not",
+                                        "condition": {
+                                          "type": "capability",
+                                          "field": "tesla_has_vehicle_bus",
+                                          "equals": true
+                                        }
+                                      },
+                                      {
+                                        "type": "param",
+                                        "key": "TeslaMadsScreenButton",
+                                        "equals": 0
+                                      }
+                                    ]
                                   }
                                 ]
                               }
@@ -188,12 +218,22 @@
                                     "equals": "tesla"
                                   },
                                   {
-                                    "type": "not",
-                                    "condition": {
-                                      "type": "capability",
-                                      "field": "tesla_has_vehicle_bus",
-                                      "equals": true
-                                    }
+                                    "type": "any",
+                                    "conditions": [
+                                      {
+                                        "type": "not",
+                                        "condition": {
+                                          "type": "capability",
+                                          "field": "tesla_has_vehicle_bus",
+                                          "equals": true
+                                        }
+                                      },
+                                      {
+                                        "type": "param",
+                                        "key": "TeslaMadsScreenButton",
+                                        "equals": 0
+                                      }
+                                    ]
                                   }
                                 ]
                               }
@@ -2296,7 +2336,7 @@
           "key": "TeslaMadsScreenButton",
           "widget": "multiple_button",
           "title": "MADS Screen Activation",
-          "description": "Use a multi-finger press on the infotainment screen to toggle MADS. This allows the use of full MADS functionality when enabled. Selecting a higher finger count may reduce accidental activations. Note: Setting this to Off will reset your MADS settings to default.",
+          "description": "Use a multi-finger press on the infotainment screen to toggle MADS. This allows the use of full MADS functionality when enabled. Selecting a higher finger count may reduce accidental activations. Note: Setting this to Off limits MADS to Disengage mode.",
           "options": [
             {
               "value": 0,
@@ -2308,10 +2348,6 @@
             },
             {
               "value": 2,
-              "label": "4-Finger"
-            },
-            {
-              "value": 3,
               "label": "5-Finger"
             }
           ],

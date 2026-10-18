@@ -268,7 +268,7 @@ def hardware_thread(end_event, hw_queue) -> None:
   chestnut = Chestnut()
   chestnut_ejector = ChestnutEjector(params)
   big_model_available = chestnut_model_ready(params)
-  accelerator_off_ts = None
+  accelerator_off_ts: float | None = None
 
   while not end_event.is_set():
     sm.update(PANDA_STATES_TIMEOUT)
@@ -369,6 +369,9 @@ def hardware_thread(end_event, hw_queue) -> None:
     startup_conditions["up_to_date"] = params.get("Offroad_ConnectivityNeeded") is None or params.get_bool("DisableUpdates") or params.get_bool("SnoozeUpdate")
     startup_conditions["no_excessive_actuation"] = params.get("Offroad_ExcessiveActuation") is None
     startup_conditions["not_uninstalling"] = not params.get_bool("DoUninstall")
+    # Once the external accelerator has been asked to power off, do not start
+    # a drive that would be interrupted by the pending comma shutdown.
+    startup_conditions["not_powering_off"] = accelerator_off_ts is None
     startup_conditions["accepted_terms"] = params.get("HasAcceptedTerms") == terms_version
     startup_conditions["accepted_terms_sp"] = params.get("HasAcceptedTermsSP") == terms_version_sp
 

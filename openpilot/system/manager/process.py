@@ -195,6 +195,63 @@ class PythonProcess(ManagerProcess):
     self.shutting_down = False
 
 
+class RestartingPythonProcess(PythonProcess):
+  """Manager-owned Python process that restarts after an isolated crash."""
+  def __init__(self, name, module, should_run, enabled=True, sigkill=False, restart_delay=5.0):
+    super().__init__(name, module, should_run, enabled=enabled, sigkill=sigkill)
+    self.restart_delay = restart_delay
+    self.next_restart_time = 0.0
+
+  def start(self) -> None:
+    if self.proc is not None and self.proc.exitcode is not None:
+      if time.monotonic() < self.next_restart_time:
+        return
+      cloudlog.error(f"restarting optional process {self.name} (exitcode {self.proc.exitcode})")
+      self.stop()
+
+    previous_proc = self.proc
+    super().start()
+    if self.proc is not None and self.proc is not previous_proc:
+      self.next_restart_time = time.monotonic() + self.restart_delay
+
+
+class BackoffRestartingPythonProcess(RestartingPythonProcess):
+  """Restart a process immediately after a stable run and exponentially back
+  off one that repeatedly dies during startup."""
+  QUICK_DEATH = 10.0
+  BACKOFF = 10.0
+  BACKOFF_MAX = 300.0
+
+  def __init__(self, name, module, should_run, enabled=True, sigkill=False):
+    super().__init__(name, module, should_run, enabled=enabled, sigkill=sigkill, restart_delay=0.0)
+    self.now = time.monotonic
+    self.started_at = 0.0
+    self.backoff = 0.0
+    self.next_start = 0.0
+
+  def start(self) -> None:
+    now = self.now()
+    if self.proc is not None and self.proc.exitcode is not None:
+      exitcode = self.proc.exitcode
+      ran_for = now - self.started_at
+      self.stop()
+      if ran_for < self.QUICK_DEATH:
+        self.backoff = min(self.BACKOFF_MAX, self.backoff * 2.0 if self.backoff else self.BACKOFF)
+        self.next_start = now + self.backoff
+        cloudlog.error(f"optional process {self.name} exited early ({exitcode}); retrying in {self.backoff:.0f} s")
+      else:
+        self.backoff = 0.0
+        self.next_start = now
+
+    if self.proc is None and now < self.next_start:
+      return
+
+    previous_proc = self.proc
+    PythonProcess.start(self)
+    if self.proc is not None and self.proc is not previous_proc:
+      self.started_at = now
+
+
 class DaemonProcess(ManagerProcess):
   """Python process that has to stay running across manager restart.
   This is used for athena so you don't lose SSH access when restarting manager."""

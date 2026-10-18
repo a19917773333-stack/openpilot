@@ -28,6 +28,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
 from jetlink.comma import gadget
@@ -124,14 +125,18 @@ def _git_show(ref: str, path: str) -> str | None:
 
 def _model_attributes(src: str) -> tuple[set[str], set[str]]:
   """What main() reads and writes on `model`, the model the loop runs: every
-  `model.<attr>` load and store, and getattr(model, '<attr>', ...)."""
+  required `model.<attr>` load and store, including the fallback helper."""
   loads, stores = set(), set()
-  for n in ast.walk(_main(src)):
-    if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == 'model':
-      (stores if isinstance(n.ctx, ast.Store) else loads).add(n.attr)
-    elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'getattr' and len(n.args) >= 2
-          and isinstance(n.args[0], ast.Name) and n.args[0].id == 'model' and isinstance(n.args[1], ast.Constant)):
-      loads.add(n.args[1].value)
+  tree = ast.parse(src)
+  roots = [_main(src)]
+  roots += [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'run_model_with_fallback']
+  for root in roots:
+    for n in ast.walk(root):
+      if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == 'model':
+        (stores if isinstance(n.ctx, ast.Store) else loads).add(n.attr)
+      elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'getattr' and len(n.args) == 2
+            and isinstance(n.args[0], ast.Name) and n.args[0].id == 'model' and isinstance(n.args[1], ast.Constant)):
+        loads.add(n.args[1].value)
   return loads, stores
 
 
@@ -262,7 +267,7 @@ class ModeldSeam:
       wrapped = 'def _block():\n' + textwrap.indent(block, '  ') + '\n  return locals()\n'
       # exec of modeld's own source is the point of this file.
       exec(compile(wrapped, str(MODELD), 'exec'), scope)
-      scope.update(scope.pop('_block')())
+      scope.update(scope.pop('_block')())  # type: ignore
     scope['environ'] = env
     return scope
 
@@ -383,7 +388,7 @@ class Footprint:
 
   def test_a_chestnut_block_never_reaches_the_adapter(self):
     for stmt in ast.walk(self.tree):
-      if _tests_name(stmt, 'CHESTNUT'):
+      if isinstance(stmt, ast.stmt) and _tests_name(stmt, 'CHESTNUT'):
         # the whole statement: the link attaches after the chestnut load, not as its `elif`
         names = {n.id for n in ast.walk(stmt) if isinstance(n, ast.Name)}
         self.assertNotIn(ADAPTER, names, f"an `if CHESTNUT:` block at line {stmt.lineno} reaches the adapter")
@@ -392,7 +397,11 @@ class Footprint:
     # the joining model demotes itself and re-runs the frame; what reaches this
     # handler from it is a small-model fault, which ChestnutActive (never set
     # without a chestnut) re-raises, as develop does
-    handler = _fallback(self.body)
+    try:
+      handler = _fallback(self.body)
+    except StopIteration:
+      helper = next(n for n in ast.parse(self.src).body if isinstance(n, ast.FunctionDef) and n.name == 'run_model_with_fallback')
+      handler = _fallback(helper.body)
     first = handler.body[0]
     self.assertTrue(isinstance(first, ast.If) and isinstance(first.body[0], ast.Raise)
                     and 'ChestnutActive' in ast.dump(first.test), "the fallback no longer opens with the ChestnutActive re-raise")
@@ -413,11 +422,12 @@ class Footprint:
     write = _index(loop, lambda s: isinstance(s, ast.Assign) and any(isinstance(t, ast.Attribute) and t.attr == 'frame_drop_ratio'
                                                                        for t in s.targets), 'the write of the share onto the model')
     was = _index(loop, lambda s: _assigns(s, 'handovers'), 'the handover count read before run()')
-    run_at = _index(loop, lambda s: isinstance(s, ast.Try) and 'run' in {n.attr for n in ast.walk(s) if isinstance(n, ast.Attribute)},
-                    'the try around model.run')
+    run_at = _index(loop, lambda s: ('run' in {n.attr for n in ast.walk(s) if isinstance(n, ast.Attribute)} or
+                                     'run_model_with_fallback' in {n.id for n in ast.walk(s) if isinstance(n, ast.Name)}),
+                    'the model run')
     reset = _index(loop, lambda s: isinstance(s, ast.If) and 'handovers' in ast.dump(s.test), 'the handover reset')
     self.assertEqual((ratio < write, write), (True, was - 1), "the share is written onto the model just before run()")
-    self.assertEqual(run_at, was + 2, "more than the timer between reading the model and running it")
+    self.assertIn(run_at - was, (2, 3), "more than the timer and chestnut send decision before running the model")
     self.assertLess(run_at, reset)
     lines = self.src.splitlines()
 
@@ -425,9 +435,10 @@ class Footprint:
       return lines[loop[a].lineno - 1:loop[b].end_lineno]
     body = src(first, ratio) + src(write, was) + ['    model.run()'] + src(reset, reset)
     frame = compile(textwrap.dedent('\n'.join(body)), str(self.PATH), 'exec')
-    model = SimpleNamespace(chestnut=False, handovers=0)
+    model = SimpleNamespace(chestnut=False, handovers=0, LONG_SMOOTH_SECONDS=0.0)
     scope = {'frame_dropped_filter': FirstOrderFilter(0., 10., 0.05), 'run_count': 0, 'last_vipc_frame_id': 0,
-             'model': model, 'max': max, 'min': min}
+             'model': model, 'CP': SimpleNamespace(longitudinalActuatorDelay=0.0),
+             'frame_delay': 0.0, 'action_delay': 0.0, 'max': max, 'min': min}
     ratios, frame_id = [], 0
     for i in range(frames):
       frame_id += 1 + skipped(i)
@@ -598,16 +609,18 @@ class HardwaredPowersOffWithoutStopping(OpenpilotTestCase):
     powering_off = next(n for n in body if isinstance(n, ast.Assign) and 'not_powering_off' in ast.dump(n.targets[0]))
     should = next(i for i, n in enumerate(body) if _assigns(n, 'should_start') and 'all' in ast.dump(n.value))
     start = next(n for n in body if isinstance(n, ast.If) and isinstance(n.test, ast.Name) and n.test.id == 'should_start')
-    check = next(n for n in body if isinstance(n, ast.If) and 'should_shutdown' in ast.dump(n.test))
+    automatic = next(n for n in body if _assigns(n, 'automatic_power_down'))
+    requested = next(n for n in body if _assigns(n, 'shutdown_requested'))
+    check = next(n for n in body if isinstance(n, ast.If) and 'shutdown_requested' in ast.dump(n.test))
     publish = next(i for i, n in enumerate(body) if "'deviceState'" in ast.dump(n) and 'send' in ast.dump(n))
     self.assertLess(body.index(powering_off), should, "the startup condition comes after the start it holds back")
     self.assertLess(body.index(check), publish, "deviceState is no longer published after the shutdown check")
 
     def code(*nodes):
-      return compile('\n'.join(textwrap.dedent(ast.get_source_segment(src, n, padded=True)) for n in nodes),
+      return compile('\n'.join(textwrap.dedent(ast.get_source_segment(src, n, padded=True) or '') for n in nodes),
                      str(HARDWARED), 'exec')
     self.init = code(init)
-    self.loop = code(powering_off, body[should], body[should + 1], start, check)
+    self.loop = code(powering_off, body[should], body[should + 1], start, automatic, requested, check)
 
   def run_loops(self, n: int, asks: bool = True, should_shutdown=True, clock_step: float = 0.5,
                 ignition=lambda now: False, started_ts=None) -> SimpleNamespace:
@@ -620,7 +633,9 @@ class HardwaredPowersOffWithoutStopping(OpenpilotTestCase):
           'onroad_conditions': onroad_conditions, 'startup_conditions': {'device_booted': True},
           'startup_conditions_prev': {}, 'startup_blocked_ts': None, 'started_ts': started_ts, 'in_car': True,
           'off_ts': 12.0 if started_ts is None else None, 'started_seen': True, 'cloudlog': mock.Mock(),
-          'jetlink_adapter': jetlink, 'time': clock, 'params': params}
+          'jetlink_adapter': jetlink, 'time': clock, 'params': params, 'hardware_profile': object(),
+          'allows_automatic_power_down': lambda profile: True,
+          'power_down_requested': lambda *, automatic, manual, profile: automatic or manual}
     exec(self.init, ns)
     self.assertIsNone(ns['accelerator_off_ts'])
     down_at, started = [], []
@@ -732,6 +747,45 @@ class StockModeld(Footprint, OpenpilotTestCase):
 
 class ModeldTinygrad(Footprint, OpenpilotTestCase):
   PATH = MODELD_V2
+
+  def test_every_frame_supplies_action_t_for_a_joining_large_model(self):
+    # JoiningModelState exposes the small model's numpy_inputs, but its large
+    # model can take over inside run() and requires action_t on that same frame.
+    loop = _frame_loop(self.body)
+    inputs = next(n for n in loop if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.target.id == 'inputs')
+    self.assertIsInstance(inputs.value, ast.Dict)
+    keys = {k.value for k in inputs.value.keys if isinstance(k, ast.Constant)}
+    self.assertIn('action_t', keys)
+    self.assertNotIn("if 'action_t' in model.numpy_inputs", self.src)
+
+  def test_a_handover_updates_the_active_models_long_delay(self):
+    loop = _frame_loop(self.body)
+    handover = next(n for n in loop if isinstance(n, ast.If) and 'handovers' in ast.dump(n.test))
+    source = ast.get_source_segment(self.src, handover)
+    self.assertIsNotNone(source)
+    assert source is not None
+    code = compile(textwrap.dedent(source), str(self.PATH), 'exec')
+    scope: dict[str, Any] = {
+      'model': SimpleNamespace(handovers=1, LONG_SMOOTH_SECONDS=0.3),
+      'handovers': 0,
+      'CP': SimpleNamespace(longitudinalActuatorDelay=0.2),
+      'frame_delay': 0.05,
+      'action_delay': 0.025,
+      'run_count': 10,
+      'frame_drop_ratio': 0.1,
+    }
+    exec(code, scope)
+    self.assertAlmostEqual(float(scope['long_delay']), 0.5)
+    self.assertAlmostEqual(float(scope['long_action_t']), 0.575)
+    self.assertEqual((scope['run_count'], scope['frame_drop_ratio']), (0, 0.0))
+
+  def test_turn_smoothing_accepts_a_jetlink_model_without_min_speed(self):
+    turn_speed = next(n.test for n in ast.walk(_main(self.src)) if isinstance(n, ast.If)
+                      and 'MIN_LAT_CONTROL_SPEED' in ast.dump(n.test))
+    condition = compile(ast.fix_missing_locations(ast.Expression(turn_speed)), str(self.PATH), 'eval')
+    model = SimpleNamespace()
+    self.assertFalse(eval(condition, {'model': model, 'v_ego': 0.3}))
+    self.assertTrue(eval(condition, {'model': model, 'v_ego': 0.31}))
 
   def test_both_modelds_join_with_the_same_lines(self):
     # jetlink's end of the join lives behind the adapter; what is left in

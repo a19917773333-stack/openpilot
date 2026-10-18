@@ -79,8 +79,11 @@ macros:
           - type: all
             conditions:
               - {type: capability, field: brand, equals: tesla}
-              - type: not
-                condition: {type: capability, field: tesla_has_vehicle_bus, equals: true}
+              - type: any
+                conditions:
+                  - type: not
+                    condition: {type: capability, field: tesla_has_vehicle_bus, equals: true}
+                  - {type: param, key: TeslaMadsScreenButton, equals: 0}
 ```
 
 In an item:
@@ -386,11 +389,11 @@ enablement:
   - {type: param, key: NeuralNetworkLateralControl, equals: false}
 ```
 
-**Negation across multiple platforms** (everything except Rivian + Tesla-no-bus):
+**Negation across multiple platforms** (everything except Rivian + Tesla without an enabled screen button):
 ```yaml
 enablement:
   - {$ref: "#/macros/offroad"}
-  - {$ref: "#/macros/mads_full_platforms"}   # macro encapsulates the not(any(rivian, all(tesla, not(bus)))) logic
+  - {$ref: "#/macros/mads_full_platforms"}
 ```
 
 If the same multi-condition block appears in 2+ items, **promote it to a macro** in `_macros.yaml`. Re-run `python sunnypilot/sunnylink/tools/apply_macros.py` to substitute existing inlined matches automatically.

@@ -9,6 +9,7 @@ BUILD_DIR=${BUILD_DIR:-/data/openpilot}
 SOURCE_DIR="$(git rev-parse --show-toplevel)"
 
 export PYTHONPATH="$BUILD_DIR:$BUILD_DIR/msgq_repo:$BUILD_DIR/opendbc_repo:$BUILD_DIR/rednose_repo:$BUILD_DIR/teleoprtc_repo:$BUILD_DIR/tinygrad_repo"
+export PREBUILT_ALL_CAMERAS=1
 
 if [ -z "$RELEASE_BRANCH" ] && [ "$SKIP_PUSH" != "1" ]; then
   echo "RELEASE_BRANCH is not set"

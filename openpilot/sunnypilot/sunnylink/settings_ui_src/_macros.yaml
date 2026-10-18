@@ -32,7 +32,7 @@ macros:
       condition: {type: capability, field: device_type, equals: mici}
 
   # Mirrors selfdrive/ui/sunnypilot/layouts/.../mads_settings.py:_mads_limited_settings()
-  # Rivian + Tesla-without-vehicle-bus get the limited MADS UI (3-toggle subset).
+  # Rivian + Tesla without a usable screen button get the limited MADS UI (3-toggle subset).
   # On those platforms these toggles are disabled — full MADS settings are
   # only writable on platforms NOT in the limited-set.
   mads_full_platforms:
@@ -44,11 +44,14 @@ macros:
           - type: all
             conditions:
               - {type: capability, field: brand, equals: tesla}
-              - type: not
-                condition: {type: capability, field: tesla_has_vehicle_bus, equals: true}
+              - type: any
+                conditions:
+                  - type: not
+                    condition: {type: capability, field: tesla_has_vehicle_bus, equals: true}
+                  - {type: param, key: TeslaMadsScreenButton, equals: 0}
 
   # Inverse of mads_full_platforms: present only on the limited platforms.
-  # Useful for "show this only on rivian/tesla-no-bus" toggles.
+  # Useful for "show this only on rivian/tesla-without-screen-button" toggles.
   mads_limited_platforms:
     - type: any
       conditions:
@@ -56,8 +59,11 @@ macros:
         - type: all
           conditions:
             - {type: capability, field: brand, equals: tesla}
-            - type: not
-              condition: {type: capability, field: tesla_has_vehicle_bus, equals: true}
+            - type: any
+              conditions:
+                - type: not
+                  condition: {type: capability, field: tesla_has_vehicle_bus, equals: true}
+                - {type: param, key: TeslaMadsScreenButton, equals: 0}
 
   # Hide on sunnypilot release branches (is_release is hardcoded False everywhere; is_sp_release is the active gate).
   release_branches_hide:

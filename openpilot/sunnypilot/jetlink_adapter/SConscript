@@ -35,6 +35,11 @@ if arch == 'comma_arm64' and os.path.isfile(capture):
   # no warp and the small model for good
   model_w, model_h = MEDMODEL_INPUT_SIZE
   prebuilt = bool(os.getenv('PREBUILT_ALL_CAMERAS'))
+  if prebuilt:
+    from openpilot.common.transformations.camera import _ar_ox_fisheye, _os_fisheye
+    all_camera_configs = {(c.width, c.height) for c in (_ar_ox_fisheye, _os_fisheye)}
+    if set(camera_configs) != all_camera_configs:
+      raise RuntimeError("PREBUILT_ALL_CAMERAS requires modeld to export every supported camera geometry")
 
   tinygrad_files = ["#" + x for x in glob.glob(env.Dir("#tinygrad_repo").relpath + "/**",
                                                recursive=True, root_dir=basedir)

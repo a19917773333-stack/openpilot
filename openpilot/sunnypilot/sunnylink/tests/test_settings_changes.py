@@ -112,11 +112,12 @@ def schema():
 
 class TestMadsBrandGates(OpenpilotTestCase):
   def test_mads_main_cruise_has_brand_gate(self, schema):
-    """MadsMainCruiseAllowed must gate on brand and tesla_has_vehicle_bus."""
+    """MadsMainCruiseAllowed must gate on Tesla's bus and screen button."""
     item = _find_item(schema, "MadsMainCruiseAllowed")
     assert item is not None
     assert _references_capability_field(item.get("enablement"), "brand")
     assert _references_capability_field(item.get("enablement"), "tesla_has_vehicle_bus")
+    assert "TeslaMadsScreenButton" in json.dumps(item.get("enablement"))
 
   def test_mads_unified_engagement_has_brand_gate(self, schema):
     """MadsUnifiedEngagementMode must mirror MadsMainCruiseAllowed brand-gate."""
@@ -124,6 +125,22 @@ class TestMadsBrandGates(OpenpilotTestCase):
     assert item is not None
     assert _references_capability_field(item.get("enablement"), "brand")
     assert _references_capability_field(item.get("enablement"), "tesla_has_vehicle_bus")
+    assert "TeslaMadsScreenButton" in json.dumps(item.get("enablement"))
+
+  def test_mads_steering_modes_follow_tesla_screen_button_gate(self, schema):
+    item = _find_item(schema, "MadsSteeringMode")
+    assert item is not None
+    for option in item["options"][:2]:
+      assert "TeslaMadsScreenButton" in json.dumps(option.get("enablement"))
+
+  def test_tesla_screen_button_options_match_runtime_values(self, schema):
+    item = _find_item(schema, "TeslaMadsScreenButton")
+    assert item is not None
+    assert item["options"] == [
+      {"value": 0, "label": "Off"},
+      {"value": 1, "label": "3-Finger"},
+      {"value": 2, "label": "5-Finger"},
+    ]
 
 
 class TestTestManeuversSection(OpenpilotTestCase):

@@ -30,6 +30,11 @@ def get_mads_limited_brands(CP: structs.CarParams, CP_SP: structs.CarParamsSP, p
     screen_button = int(params.get("TeslaMadsScreenButton", return_default=True))
     return screen_button == MadsScreenButtonType.OFF
 
+  if CP.brand == 'tesla':
+    has_vehicle_bus = bool(CP_SP.flags & TeslaFlagsSP.HAS_VEHICLE_BUS)
+    screen_button = params.get("TeslaMadsScreenButton", return_default=True)
+    return not has_vehicle_bus or screen_button == MadsScreenButtonType.OFF
+
   return False
 
 
