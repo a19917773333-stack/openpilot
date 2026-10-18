@@ -565,12 +565,12 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   leftLaneChangeEdgeBlock @1 :Bool;
   rightLaneChangeEdgeBlock @2 :Bool;
 
-  bigModelAvailableDEPRECATED @8 :Bool;  # acceleratorState ready says it
+  bigModelAvailableDEPRECATED @3 :Bool;  # acceleratorState ready says it
 
   # Runtime state of an off-board accelerator (sunnypilot/accelerators). Offroad
   # progress stays in the AcceleratorProgress param; telemetry waits for a customReserved slot.
-  acceleratorState @9 :AcceleratorState;
-  acceleratorNameDEPRECATED @10 :Text;  # always jetlink
+  acceleratorState @4 :AcceleratorState;
+  acceleratorNameDEPRECATED @5 :Text;  # always jetlink
 
   enum AcceleratorState {
     none @0;
