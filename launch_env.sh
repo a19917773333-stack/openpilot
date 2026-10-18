@@ -30,6 +30,7 @@ if [ -z "$SP_PROFILE_VALUE" ]; then
 fi
 
 if [ "$SP_PROFILE_VALUE" = "c3xl" ]; then
+  export C3XL_IFE_ROAD_SIZE="${C3XL_IFE_ROAD_SIZE-1344x760}"
   [ -z "$AGNOS_VERSION" ] && export AGNOS_VERSION="19.7"
   [ -z "$AGNOS_MANIFEST_FILE" ] && export AGNOS_MANIFEST_FILE="openpilot/common/hardware/comma/agnos-c3xl.json"
 else

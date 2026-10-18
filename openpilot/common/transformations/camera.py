@@ -1,10 +1,10 @@
 import itertools
 import os
-from pathlib import Path
 import numpy as np
 from dataclasses import dataclass
 
 import openpilot.common.transformations.orientation as orient
+from openpilot.sunnypilot.hardware.profile import HardwareProfile, get_hardware_profile
 
 ## -- hardcoded hardware params --
 @dataclass(frozen=True)
@@ -89,13 +89,11 @@ def _ife_road_camera(camera):
                             camera.focal_length * 760 / camera.height)
 
 
-if os.getenv('C3XL_IFE_ROAD_SIZE') == '1344x760':
-  profile = Path('/data/hardware_profile')
-  if profile.is_file() and profile.read_text().strip() == 'c3xl':
-    for device in ('tici', 'tizi', 'mici'):
-      original = DEVICE_CAMERAS[(device, 'ox03c10')]
-      DEVICE_CAMERAS[(device, 'ox03c10')] = DeviceCameraConfig(
-        _ife_road_camera(original.narrow_road), original.cabin, _ife_road_camera(original.wide_road))
+if os.getenv('C3XL_IFE_ROAD_SIZE') == '1344x760' and get_hardware_profile() == HardwareProfile.C3XL:
+  for device in ('tici', 'tizi', 'mici'):
+    original = DEVICE_CAMERAS[(device, 'ox03c10')]
+    DEVICE_CAMERAS[(device, 'ox03c10')] = DeviceCameraConfig(
+      _ife_road_camera(original.narrow_road), original.cabin, _ife_road_camera(original.wide_road))
 
 
 # device/mesh : x->forward, y-> right, z->down
