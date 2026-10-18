@@ -65,7 +65,6 @@ class UIStateSP:
     self.active_bundle = None
     self.model_runner_tinygrad: bool = False
     self.jetlink = None
-    self.adb_blocked: bool = False
     # the Accelerator Link holds the USB port, so ADB is off and its toggle grayed out
     self.adb_blocked: bool = False
     self._accelerator_state_name: str = 'none'
@@ -293,11 +292,6 @@ class UIStateSP:
       self.params.remove("CustomAccIncrementsEnabled")
       self.params.remove("SmartCruiseControlVision")
       self.params.remove("SmartCruiseControlMap")
-
-  def _enforce_usb_port(self) -> None:
-    self.adb_blocked = self.jetlink is not None and self.jetlink.enabled
-    if self.adb_blocked and self.params.get_bool("AdbEnabled"):
-      self.params.put_bool("AdbEnabled", False, block=True)
 
   def _enforce_usb_port(self) -> None:
     """ADB and the Accelerator Link both need the comma's USB port: the link
