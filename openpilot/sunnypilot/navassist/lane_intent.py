@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -85,6 +86,9 @@ class NavTurnSignalCoordinator:
 
   SIGNAL_TIMEOUT_NS = 60_000_000_000
   PLAN_GAP_GRACE_NS = 1_500_000_000
+  EVENT_CHANGE_HOLD_NS = 60_000_000_000
+  EVENT_CHANGE_HOLD_DISTANCE_M = 25.0
+  EVENT_CHANGE_HOLD_SPEED_MPS = 10.0
   LOOKAHEAD_TIME_S = 8.0
   MIN_LOOKAHEAD_M = 40.0
   MAX_LOOKAHEAD_M = 250.0
@@ -114,6 +118,8 @@ class NavTurnSignalCoordinator:
     self._plan_gap_since_ns: int | None = None
     self._completion_hold = False
     self._turn_clear_since_ns = 0
+    self._event_change_since_ns = 0
+    self._last_distance_m = float("inf")
 
   def _reset(self, reason: str = "idle") -> NavLaneIntent:
     self._active_key = None
@@ -122,7 +128,33 @@ class NavTurnSignalCoordinator:
     self._plan_gap_since_ns = None
     self._completion_hold = False
     self._turn_clear_since_ns = 0
+    self._event_change_since_ns = 0
+    self._last_distance_m = float("inf")
     return NavLaneIntent(reason=reason)
+
+  def _hold_nav_event_change(self, plan: NavTurnPlan, speed_mps: float, now_ns: int) -> bool:
+    """Bridge navigation event churn while the ego waits at a junction.
+
+    The phone briefly reports event 0/valid=false, or advances to another
+    event id, while the car is still standing at the same turn. Dropping the
+    lamp there leaves the model without a turn intent when the light turns
+    green, so retain the direction while the maneuver is still local and the
+    ego is slow. The hold is bounded and never bridges a direction change or
+    a new route.
+    """
+    distance = plan.distance_m if math.isfinite(plan.distance_m) else self._last_distance_m
+    if not math.isfinite(distance) or not 0.0 <= distance <= self.EVENT_CHANGE_HOLD_DISTANCE_M:
+      return False
+    if max(0.0, speed_mps) > self.EVENT_CHANGE_HOLD_SPEED_MPS:
+      return False
+    if self._event_change_since_ns == 0:
+      self._event_change_since_ns = now_ns
+    if now_ns - self._event_change_since_ns > self.EVENT_CHANGE_HOLD_NS:
+      return False
+    # Still at the same maneuver: restart the bounded lamp watchdog so a red
+    # light does not consume the approach timeout.
+    self._active_since_ns = now_ns
+    return True
 
   def update(self, plan: NavTurnPlan, *, speed_mps: float, now_ns: int,
              turn_geometry_active: bool = False, lookahead_time_s: float | None = None) -> NavLaneIntent:
@@ -132,10 +164,16 @@ class NavTurnSignalCoordinator:
     if self._active_key is not None:
       if now_ns - self._active_since_ns > self.SIGNAL_TIMEOUT_NS:
         return self._reset("turnSignalTimeout")
+      if math.isfinite(plan.distance_m):
+        self._last_distance_m = plan.distance_m
       if event_key != self._active_key or direction != self._active_direction:
         route_continuous = (plan.session_id, plan.route_revision) == self._active_key[:2]
         if not route_continuous:
           return self._reset("turnChanged")
+        # A real direction change is a new maneuver, never a transient.
+        if direction not in (LaneIntentDirection.none, self._active_direction):
+          return self._reset("turnChanged")
+        reason = "turnCompletion"
         if turn_geometry_active:
           self._completion_hold = True
           self._turn_clear_since_ns = 0
@@ -144,6 +182,8 @@ class NavTurnSignalCoordinator:
             self._turn_clear_since_ns = now_ns
           elif now_ns - self._turn_clear_since_ns > self.TURN_CLEAR_STABLE_NS:
             return self._reset("turnChanged")
+        elif self._hold_nav_event_change(plan, speed_mps, now_ns):
+          reason = "turnEventGrace"
         else:
           return self._reset("turnChanged")
         return NavLaneIntent(
@@ -151,10 +191,11 @@ class NavTurnSignalCoordinator:
           direction=self._active_direction,
           request_id=plan.maneuver_event_id,
           target_lane_index=-1,
-          reason="turnCompletion",
+          reason=reason,
         )
       self._completion_hold = False
       self._turn_clear_since_ns = 0
+      self._event_change_since_ns = 0
       if not plan.valid:
         if self._plan_gap_since_ns is None:
           self._plan_gap_since_ns = now_ns
@@ -190,6 +231,8 @@ class NavTurnSignalCoordinator:
     self._active_direction = direction
     self._active_since_ns = now_ns
     self._plan_gap_since_ns = None
+    self._event_change_since_ns = 0
+    self._last_distance_m = plan.distance_m if math.isfinite(plan.distance_m) else float("inf")
     return NavLaneIntent(
       signal_requested=True,
       direction=direction,

@@ -170,6 +170,64 @@ def test_navigation_turn_signal_holds_through_recorded_snapshot_gaps_until_maneu
   assert not completed.signal_requested
 
 
+def test_navigation_turn_signal_survives_event_churn_while_waiting_at_the_light():
+  coordinator = NavTurnSignalCoordinator()
+  coordinator.update(turn_plan(maneuver="uTurnLeft", distance=15.0), speed_mps=4.0, now_ns=0)
+
+  dropped = coordinator.update(
+    turn_plan(valid=False, maneuver="uTurnLeft", distance=6.0, event=0), speed_mps=0.0,
+    now_ns=10_000_000_000,
+  )
+  resumed = coordinator.update(
+    turn_plan(maneuver="uTurnLeft", distance=0.0, event=12), speed_mps=0.4, now_ns=20_000_000_000,
+  )
+
+  assert dropped.signal_requested and dropped.reason == "turnEventGrace"
+  assert dropped.direction == LaneIntentDirection.left
+  assert resumed.signal_requested and resumed.reason == "turnEventGrace"
+  assert resumed.direction == LaneIntentDirection.left
+
+
+def test_navigation_turn_signal_immediately_cancels_a_reversed_maneuver():
+  coordinator = NavTurnSignalCoordinator()
+  coordinator.update(turn_plan(maneuver="turnLeft", distance=20.0), speed_mps=3.0, now_ns=0)
+
+  flipped = coordinator.update(
+    turn_plan(maneuver="turnRight", distance=18.0, event=12), speed_mps=0.5, now_ns=1_000_000_000,
+  )
+
+  assert not flipped.signal_requested and flipped.reason == "turnChanged"
+
+
+def test_navigation_turn_signal_releases_event_hold_once_the_maneuver_is_far():
+  coordinator = NavTurnSignalCoordinator()
+  coordinator.update(turn_plan(distance=15.0), speed_mps=3.0, now_ns=0)
+  held = coordinator.update(
+    turn_plan(valid=False, distance=6.0, event=0), speed_mps=0.2, now_ns=2_000_000_000,
+  )
+  departed = coordinator.update(
+    turn_plan(distance=180.0, event=13), speed_mps=8.0, now_ns=6_000_000_000,
+  )
+
+  assert held.signal_requested and held.reason == "turnEventGrace"
+  assert not departed.signal_requested
+
+
+def test_navigation_turn_signal_event_hold_is_bounded():
+  coordinator = NavTurnSignalCoordinator()
+  coordinator.update(turn_plan(distance=15.0), speed_mps=3.0, now_ns=0)
+  held = coordinator.update(
+    turn_plan(valid=False, distance=6.0, event=0), speed_mps=0.0, now_ns=2_000_000_000,
+  )
+  expired = coordinator.update(
+    turn_plan(valid=False, distance=6.0, event=0), speed_mps=0.0,
+    now_ns=2_000_000_000 + NavTurnSignalCoordinator.EVENT_CHANGE_HOLD_NS + 1,
+  )
+
+  assert held.signal_requested
+  assert not expired.signal_requested
+
+
 def test_navigation_turn_signal_retains_a_bounded_hard_timeout():
   coordinator = NavTurnSignalCoordinator()
   coordinator.update(turn_plan(), speed_mps=15.0, now_ns=0)

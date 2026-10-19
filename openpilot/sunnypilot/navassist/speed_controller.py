@@ -16,6 +16,7 @@ COMFORT_BRAKE = 1.2
 ACTUATION_DELAY_S = 1.0
 ADMISSION_MARGIN_M = 5.0
 ACTIVATION_MARGIN_M = 25.0
+ADMISSION_STOPPED_SPEED_MPS = 0.5
 MAX_MANEUVER_DISTANCE_M = 2_000.0
 MAX_NAV_SPEED_MPS = V_CRUISE_MAX / 3.6
 MIN_TARGET_SPEED_MPS = 2.0
@@ -151,7 +152,11 @@ class NavigationSpeedController:
       self.event_key = event_key
       self.target_speed = target_speed
       self.required_distance = required_distance
-      self.event_admitted = distance >= required_distance + ADMISSION_MARGIN_M
+      # Already standing at the maneuver is as admissible as braking into it:
+      # a red light at the turn leaves no room for the nominal approach margin.
+      stopped_at_maneuver = (v_ego <= target_speed + ADMISSION_STOPPED_SPEED_MPS and
+                             distance <= ADMISSION_MARGIN_M)
+      self.event_admitted = distance >= required_distance + ADMISSION_MARGIN_M or stopped_at_maneuver
       self.event_rejected = not self.event_admitted
       self.event_activated = False
 

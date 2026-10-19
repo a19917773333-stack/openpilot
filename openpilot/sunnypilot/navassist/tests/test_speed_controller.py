@@ -101,6 +101,23 @@ def test_admitted_turn_holds_navigation_ceiling_at_zero_distance_until_event_cha
   assert controller.output_v_target == pytest.approx(5.0)
 
 
+def test_stopped_at_maneuver_re_admits_after_navigation_event_churn():
+  controller = NavigationSpeedController(enabled=True)
+  update(controller, FakeSM(nav(distance=100.0)))
+  update(controller, FakeSM(nav(distance=10.0)), v_ego=2.0)
+  assert controller.is_active
+
+  # The phone drops the event at the light, then returns with a new id while
+  # the car is standing on the maneuver point with no room for an approach.
+  update(controller, FakeSM(nav(distance=0.0, event_id=0, valid=False)), v_ego=0.0)
+  assert not controller.is_active
+
+  update(controller, FakeSM(nav(distance=0.0, event_id=9)), v_ego=0.0)
+  assert controller.event_admitted
+  assert controller.is_active
+  assert controller.output_v_target == pytest.approx(5.0)
+
+
 def test_next_route_event_does_not_inherit_previous_turn_activation():
   controller = NavigationSpeedController(enabled=True)
   update(controller, FakeSM(nav(distance=100.0)))

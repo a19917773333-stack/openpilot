@@ -352,6 +352,7 @@ def main(demo=False):
   frame_id = 0
   last_vipc_frame_id = 0
   run_count = 0
+  turn_pulse_armed = False
 
   model_transform_main = np.zeros((3, 3), dtype=np.float32)
   model_transform_extra = np.zeros((3, 3), dtype=np.float32)
@@ -434,6 +435,18 @@ def main(demo=False):
     vec_desire = np.zeros(ModelConstants.DESIRE_LEN, dtype=np.float32)
     if desire >= 0 and desire < ModelConstants.DESIRE_LEN:
       vec_desire[desire] = 1
+    # The model consumes desire as a one-frame rising edge, and its internal
+    # turn plan fades while the car waits at a light. Re-arm the pulse when
+    # pulling away so a lamp that stayed on still plans the turn.
+    if v_ego < 0.2:
+      turn_pulse_armed = True
+    elif turn_pulse_armed and v_ego > 0.5 and desire != log.Desire.none:
+      prev_desire = getattr(model, "prev_desire", None)
+      if prev_desire is not None:
+        prev_desire[:] = 0
+      else:
+        vec_desire[:] = 0
+      turn_pulse_armed = False
 
     # tracked dropped frames
     vipc_dropped_frames = max(0, meta_main.frame_id - last_vipc_frame_id - 1)
