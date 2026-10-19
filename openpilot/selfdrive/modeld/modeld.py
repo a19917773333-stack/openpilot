@@ -82,13 +82,13 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
     desired_accel = model_output['action'][0,1]
     desired_curvature = model_output['action'][0,0] / (max(1.0, v_ego))**2
 
+  scaled_curvature = scale_turn_curvature(desired_curvature, turn_direction, turn_curvature_scale)
   path_curvature = path_curvature_for_turn(
     model_output.get('plan'), ModelConstants.T_IDXS, v_ego, lat_action_t, turn_direction,
+    action_curvature=scaled_curvature, prev_curvature=prev_action.desiredCurvature,
+    lane_lines=model_output.get('lane_lines'), lane_probs=model_output.get('lane_lines_prob'),
   )
-  if path_curvature is not None:
-    desired_curvature = path_curvature
-  else:
-    desired_curvature = scale_turn_curvature(desired_curvature, turn_direction, turn_curvature_scale)
+  desired_curvature = path_curvature if path_curvature is not None else scaled_curvature
   stop = should_stop(v_ego, desired_accel)
   desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, LONG_SMOOTH_SECONDS)
   if v_ego > MIN_LAT_CONTROL_SPEED:

@@ -291,13 +291,13 @@ class ModelState(ModelStateBase):
       desired_accel = model_output['action'][0, 1]
       desired_curvature = model_output['action'][0, 0] / (max(1.0, v_ego))**2
 
+    scaled_curvature = scale_turn_curvature(desired_curvature, turn_direction, turn_curvature_scale)
     path_curvature = path_curvature_for_turn(
       model_output.get('plan'), self.constants.T_IDXS, v_ego, lat_action_t, turn_direction,
+      action_curvature=scaled_curvature, prev_curvature=prev_action.desiredCurvature,
+      lane_lines=model_output.get('lane_lines'), lane_probs=model_output.get('lane_lines_prob'),
     )
-    if path_curvature is not None:
-      desired_curvature = path_curvature
-    else:
-      desired_curvature = scale_turn_curvature(desired_curvature, turn_direction, turn_curvature_scale)
+    desired_curvature = path_curvature if path_curvature is not None else scaled_curvature
     stop = v_ego < 0.3 and desired_accel < 0.1
     desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, self.LONG_SMOOTH_SECONDS)
 
