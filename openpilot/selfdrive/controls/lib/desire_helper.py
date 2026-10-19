@@ -9,6 +9,11 @@ LaneChangeDirection = log.LaneChangeDirection
 TurnDirection = custom.ModelDataV2SP.TurnDirection
 
 LANE_CHANGE_SPEED_MIN = 20 * CV.MPH_TO_MS
+LANE_CHANGE_START_MARGIN = 0.5  # m/s, avoid starting at the exact 20 mph boundary
+LANE_CHANGE_MAX_STEERING_ANGLE_DEG = 20.0
+MANUAL_TURN_ENTER_STEERING_DEG = 5.0
+MANUAL_TURN_HOLD_STEERING_DEG = 2.0
+MANUAL_TURN_MIN_SPEED_MPS = 0.5
 LANE_CHANGE_TIME_MAX = 10.
 LANE_CHANGE_START_TIME = 0.5
 
@@ -33,6 +38,7 @@ class DesireHelper:
     self._active_nav_signal_feedback = False
     self._nav_signal_tail_direction: str | None = None
     self._nav_signal_tail_turn_only = False
+    self._manual_turn_direction: str | None = None
 
   @staticmethod
   def get_lane_change_direction(left_blinker, right_blinker):
@@ -99,6 +105,11 @@ class DesireHelper:
     right_blinker = bool((carstate.rightBlinker and not suppress_turn_only_right) or nav_right)
     one_blinker = left_blinker != right_blinker
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
+    lane_change_speed_ok = v_ego >= LANE_CHANGE_SPEED_MIN + LANE_CHANGE_START_MARGIN
+    steering_angle_deg = float(getattr(carstate, "steeringAngleDeg", 0.0))
+    steering_turn = abs(steering_angle_deg) >= LANE_CHANGE_MAX_STEERING_ANGLE_DEG
+    manual_turn_speed_ok = (MANUAL_TURN_MIN_SPEED_MPS <= v_ego <=
+                            self.lane_turn_controller.get_manual_speed_limit())
 
     # A navigation lane-change lamp must not look like an intersection turn to
     # LaneTurnDesire. A driver lamp alone is also insufficient: without a
@@ -124,17 +135,33 @@ class DesireHelper:
       (nav_turn_only and nav_direction == "right")
       or (self._nav_signal_tail_direction == "right" and self._nav_signal_tail_turn_only)
     )
+    manual_turn_allowed = bool(lateral_active and not nav_requested and one_blinker and manual_turn_speed_ok)
+    if manual_turn_allowed and carstate.leftBlinker and not carstate.rightBlinker:
+      threshold = (MANUAL_TURN_HOLD_STEERING_DEG if self._manual_turn_direction == "left"
+                   else MANUAL_TURN_ENTER_STEERING_DEG)
+      self._manual_turn_direction = "left" if steering_angle_deg >= threshold else None
+    elif manual_turn_allowed and carstate.rightBlinker and not carstate.leftBlinker:
+      threshold = (MANUAL_TURN_HOLD_STEERING_DEG if self._manual_turn_direction == "right"
+                   else MANUAL_TURN_ENTER_STEERING_DEG)
+      self._manual_turn_direction = "right" if steering_angle_deg <= -threshold else None
+    else:
+      self._manual_turn_direction = None
+
+    manual_turn_left = self._manual_turn_direction == "left"
+    manual_turn_right = self._manual_turn_direction == "right"
+    manual_turn_active = manual_turn_left or manual_turn_right
     lane_turn_left_blinker = bool(
-      carstate.leftBlinker and nav_turn_left and not (nav_lane_signal_left or nav_lane_tail_left)
+      carstate.leftBlinker and (nav_turn_left or manual_turn_left) and not (nav_lane_signal_left or nav_lane_tail_left)
     )
     lane_turn_right_blinker = bool(
-      carstate.rightBlinker and nav_turn_right and not (nav_lane_signal_right or nav_lane_tail_right)
+      carstate.rightBlinker and (nav_turn_right or manual_turn_right) and not (nav_lane_signal_right or nav_lane_tail_right)
     )
 
     # Lane turn controller update
     self.lane_turn_controller.update_lane_turn(blindspot_left=carstate.leftBlindspot, blindspot_right=carstate.rightBlindspot,
                                                left_blinker=lane_turn_left_blinker,
-                                               right_blinker=lane_turn_right_blinker, v_ego=v_ego)
+                                               right_blinker=lane_turn_right_blinker, v_ego=v_ego,
+                                               manual_turn=manual_turn_active)
     self.lane_turn_direction = self.lane_turn_controller.get_turn_direction()
 
     if (not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX or
@@ -143,7 +170,8 @@ class DesireHelper:
       self.lane_change_direction = LaneChangeDirection.none
       self.lane_change_timer = 0.0
     else:
-      if self.lane_change_state == LaneChangeState.off and one_blinker and not self.prev_one_blinker and not below_lane_change_speed:
+      if (self.lane_change_state == LaneChangeState.off and one_blinker and not self.prev_one_blinker and
+          lane_change_speed_ok and not steering_turn and not manual_turn_active):
         self.lane_change_state = LaneChangeState.preLaneChange
         self.lane_change_timer = 0.0
         # Initialize lane change direction to prevent UI alert flicker
@@ -176,7 +204,7 @@ class DesireHelper:
 
         self.alc.update_lane_change(lane_change_blocked, carstate.brakePressed)
 
-        if not one_blinker or below_lane_change_speed:
+        if not one_blinker or below_lane_change_speed or steering_turn or manual_turn_active:
           self.lane_change_state = LaneChangeState.off
           self.lane_change_direction = LaneChangeDirection.none
           self.lane_change_timer = 0.0
@@ -188,7 +216,13 @@ class DesireHelper:
       elif self.lane_change_state == LaneChangeState.laneChangeStarting:
         self.lane_change_timer += DT_MDL
 
-        if lane_change_prob < 0.02 and self.lane_change_timer >= LANE_CHANGE_START_TIME:
+        if steering_turn or manual_turn_active:
+          # A turn signal at an intersection can otherwise stay a lane change
+          # through the whole turn and pull the car toward the oncoming lane.
+          self.lane_change_state = LaneChangeState.off
+          self.lane_change_direction = LaneChangeDirection.none
+          self.lane_change_timer = 0.0
+        elif lane_change_prob < 0.02 and self.lane_change_timer >= LANE_CHANGE_START_TIME:
           self.lane_change_timer = 0.0
           if one_blinker:
             self.lane_change_state = LaneChangeState.preLaneChange

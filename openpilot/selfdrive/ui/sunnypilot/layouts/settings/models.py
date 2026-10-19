@@ -103,9 +103,9 @@ class ModelsLayout(Widget):
                                                             f" {'km/h' if ui_state.is_metric else 'mph'}")
 
     self.lane_turn_desire_toggle = toggle_item_sp(tr("Use Lane Turn Desires"),
-                                                  tr("If you're driving at 20 mph (32 km/h) or below and have your blinker on," +
-                                                     " the car will plan a turn in that direction at the nearest drivable path. " +
-                                                     "This prevents situations (like at red lights) where the car might plan the wrong turn direction."),
+                                                  tr("In the configured low-speed turn window, a blinker plus steering in the same direction" +
+                                                     " makes the car plan that turn. This prevents situations (like at red lights) where the car" +
+                                                     " might plan a shallow lane change instead of the intended turn."),
                                                   param="LaneTurnDesire")
 
     self.delay_control = option_item_sp(tr("Adjust Software Delay"), "LagdToggleDelay", 5, 50,

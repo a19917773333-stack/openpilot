@@ -12,6 +12,8 @@ from openpilot.common.params import Params
 TurnDirection = custom.ModelDataV2SP.TurnDirection
 
 LANE_CHANGE_SPEED_MIN = 20 * CV.MPH_TO_MS
+MANUAL_TURN_SPEED_MARGIN = 0.5  # m/s, bridge the lane-change entry margin
+MANUAL_TURN_SPEED_MAX = LANE_CHANGE_SPEED_MIN + MANUAL_TURN_SPEED_MARGIN
 
 
 class LaneTurnController:
@@ -33,10 +35,15 @@ class LaneTurnController:
       self.read_params()
     self.param_read_counter += 1
 
-  def update_lane_turn(self, blindspot_left: bool, blindspot_right: bool, left_blinker: bool, right_blinker: bool, v_ego: float) -> None:
-    if left_blinker and not right_blinker and v_ego < self.lane_turn_value and not blindspot_left:
+  def get_manual_speed_limit(self) -> float:
+    return min(self.lane_turn_value + MANUAL_TURN_SPEED_MARGIN, MANUAL_TURN_SPEED_MAX)
+
+  def update_lane_turn(self, blindspot_left: bool, blindspot_right: bool, left_blinker: bool, right_blinker: bool,
+                       v_ego: float, *, manual_turn: bool = False) -> None:
+    speed_limit = self.get_manual_speed_limit() if manual_turn else self.lane_turn_value
+    if left_blinker and not right_blinker and v_ego < speed_limit and not blindspot_left:
       self.turn_direction = TurnDirection.turnLeft
-    elif right_blinker and not left_blinker and v_ego < self.lane_turn_value and not blindspot_right:
+    elif right_blinker and not left_blinker and v_ego < speed_limit and not blindspot_right:
       self.turn_direction = TurnDirection.turnRight
     else:
       self.turn_direction = TurnDirection.none

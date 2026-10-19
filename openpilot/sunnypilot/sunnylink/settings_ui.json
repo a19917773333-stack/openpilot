@@ -2110,7 +2110,7 @@
               "key": "LaneTurnDesire",
               "widget": "toggle",
               "title": "Use Lane Turn Desires",
-              "description": "If navigation has an active turn instruction, you are driving at 20 mph (32 km/h) or below, and your blinker is on in the same direction, the car will plan that turn. Without a valid navigation turn request the car stays in lane-keeping instead of choosing a path through the intersection on its own."
+              "description": "In the configured low-speed turn window, a blinker plus steering in the same direction makes the car plan the turn. A matching navigation turn instruction can request it without driver steering. This prevents an intersection turn from being planned as a shallow lane change."
             },
             {
               "key": "LaneTurnValue",
