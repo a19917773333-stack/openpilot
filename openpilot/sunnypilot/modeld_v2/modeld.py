@@ -621,7 +621,7 @@ def main(demo=False):
           plan[:, Plan.T_FROM_CURRENT_EULER][:, 2], plan[:, Plan.ORIENTATION_RATE][:, 2],
           model.constants.T_IDXS, v_ego, lat_action_t,
         )
-        if v_ego > model.MIN_LAT_CONTROL_SPEED:
+        if v_ego > getattr(model, 'MIN_LAT_CONTROL_SPEED', 0.3):
           turn_curvature = smooth_value(turn_curvature, prev_action.desiredCurvature, model.LAT_SMOOTH_SECONDS)
         else:
           turn_curvature = prev_action.desiredCurvature
