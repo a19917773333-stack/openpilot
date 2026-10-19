@@ -3,10 +3,12 @@ from types import SimpleNamespace
 import pytest
 
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
+from openpilot.sunnypilot.navassist.settings import NavAssistSettings
 from openpilot.sunnypilot.navassist.speed_controller import NavigationSpeedController
 from openpilot.sunnypilot.navassist.tests.test_speed_controller import FakeSM, nav
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_backends.registry import BackendId
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP, LongitudinalPlanSource
+from openpilot.sunnypilot.selfdrive.controls.lib.turn_speed_ceiling import TurnSpeedCeiling
 
 
 def planner(backend, *, enabled=True):
@@ -15,6 +17,8 @@ def planner(backend, *, enabled=True):
   result = object.__new__(LongitudinalPlannerSP)
   result.active_backend_id = backend
   result.nav = NavigationSpeedController(enabled=enabled, require_sp_longitudinal_owner=True)
+  settings = NavAssistSettings()
+  result.turn_speed = TurnSpeedCeiling(settings_provider=lambda: settings)
   result.scc = SimpleNamespace(
     update=lambda *args: None,
     vision=SimpleNamespace(is_active=False, output_v_target=V_CRUISE_UNSET, output_a_target=0.0),
@@ -29,9 +33,13 @@ def planner(backend, *, enabled=True):
   return result
 
 
-def targets(planner, *, distance=100.0, healthy=True, cruise=15.0, accel=0.1, speed=10.0):
+def targets(planner, *, distance=100.0, healthy=True, cruise=15.0, accel=0.1, speed=10.0,
+            left_blinker=False, right_blinker=False):
   sm = FakeSM(nav(distance=distance), healthy=healthy)
   sm['carState'].vCruiseCluster = cruise * 3.6
+  sm['carState'].leftBlinker = left_blinker
+  sm['carState'].rightBlinker = right_blinker
+  sm['carState'].steeringAngleDeg = 0.0
   sm['carControl'] = SimpleNamespace(enabled=True, longActive=True, cruiseControl=SimpleNamespace(override=False))
   return planner.update_targets(sm, speed, accel, cruise)
 
@@ -94,3 +102,15 @@ def test_unregistered_backend_is_not_implicitly_admitted(backend):
   targets(p)
   assert targets(p, distance=60.0) == (15.0, 0.1)
   assert not p.nav.event_admitted
+
+
+@pytest.mark.parametrize('backend', list(BackendId))
+def test_all_three_backends_receive_the_signaled_turn_ceiling(backend):
+  p = planner(backend)
+  assert targets(p, left_blinker=True, speed=8.0) == (5.0, 0.1)
+  assert p.turn_speed.is_active
+
+  # Cancelling the lamp releases at 1 m/s^2 instead of jumping to cruise.
+  released = targets(p, speed=8.0)
+  assert released[0] == pytest.approx(5.0 + 1.0 * 0.05)
+  assert released[1] == 0.1

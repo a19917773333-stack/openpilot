@@ -8,7 +8,7 @@ See the LICENSE.md file in the root directory for more details.
 from openpilot.cereal import messaging, custom
 from opendbc.car import structs
 from openpilot.common.constants import CV
-from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
+from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimentalController
 from openpilot.sunnypilot.selfdrive.controls.lib.e2e_alerts_helper import E2EAlertsHelper
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.smart_cruise_control import SmartCruiseControl
@@ -17,7 +17,9 @@ from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_resolve
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 from openpilot.sunnypilot.models.helpers import get_active_bundle
 from openpilot.sunnypilot.navassist.speed_controller import NavigationSpeedController
+from openpilot.sunnypilot.navassist.settings import SettingsCache
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_backends.registry import BackendId
+from openpilot.sunnypilot.selfdrive.controls.lib.turn_speed_ceiling import TurnSpeedCeiling
 
 DecState = custom.LongitudinalPlanSP.DynamicExperimentalControl.DynamicExperimentalControlState
 LongitudinalPlanSource = custom.LongitudinalPlanSP.LongitudinalPlanSource
@@ -31,7 +33,10 @@ class LongitudinalPlannerSP:
     self.scc = SmartCruiseControl()
     self.resolver = SpeedLimitResolver()
     self.sla = SpeedLimitAssist(CP, CP_SP)
-    self.nav = NavigationSpeedController(enabled=CP.brand == "tesla", require_sp_longitudinal_owner=CP.brand == "tesla")
+    self.settings_cache = SettingsCache()
+    self.nav = NavigationSpeedController(enabled=CP.brand == "tesla", require_sp_longitudinal_owner=CP.brand == "tesla",
+                                         settings_provider=self.settings_cache.read)
+    self.turn_speed = TurnSpeedCeiling(settings_provider=self.settings_cache.read)
     self.generation = int(model_bundle.generation) if (model_bundle := get_active_bundle()) else None
     self.source = LongitudinalPlanSource.cruise
     self.e2e_alerts_helper = E2EAlertsHelper()
@@ -83,6 +88,10 @@ class LongitudinalPlannerSP:
 
     self.source = min(targets, key=lambda k: targets[k][0])
     self.output_v_target, self.output_a_target = targets[self.source]
+    self.turn_speed.update(sm, v_ego=v_ego, v_cruise=self.output_v_target,
+                           long_active=bool(sm['carControl'].longActive))
+    if self.turn_speed.output_v_target != V_CRUISE_UNSET:
+      self.output_v_target = min(self.output_v_target, self.turn_speed.output_v_target)
     return self.output_v_target, self.output_a_target
 
   def update(self, sm: messaging.SubMaster) -> None:
@@ -121,7 +130,7 @@ class LongitudinalPlannerSP:
     sccVision.state = self.scc.vision.state
     sccVision.vTarget = float(self.scc.vision.output_v_target)
     sccVision.aTarget = float(self.scc.vision.output_a_target)
-    sccVision.currentLateralAccel = float(self.scc.vision.current_lat_acc)
+    sccVision.currentLateralAccel = float(self.scc.vision.desired_lat_acc)
     sccVision.maxPredictedLateralAccel = float(self.scc.vision.max_pred_lat_acc)
     sccVision.enabled = self.scc.vision.is_enabled
     sccVision.active = self.scc.vision.is_active

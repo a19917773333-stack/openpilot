@@ -32,8 +32,32 @@ TURN_FAST_RELEASE_RATE = 0.04  # 1/m per second once the turn has ended
 TURN_START_EPS = 0.005         # below this the turn has not really started
 TURN_START_ASSIST_MAX = 0.03   # cap the path's help at turn entry
 
-MAX_TURN_CURVATURE = 0.08      # 1/m, radius 12.5 m
+# Once the lamp turns off the car can still be unwinding from a sharp low-speed
+# turn.  Do not hand control straight back to the action head while its lane
+# confidence is poor: hold the established direction and release it at a
+# bounded rate until the wheel is close to centre.
+TURN_SETTLE_MIN_CURVATURE = 0.015
+TURN_SETTLE_MIN_ANGLE_DEG = 8.0
+TURN_SETTLE_MAX_SPEED_MPS = 8.0
+TURN_SETTLE_RELEASE_RATE = 0.03  # 1/m per second
+
+MAX_TURN_CURVATURE = 0.12      # 1/m, radius 8.3 m
 MAX_TURN_LATERAL_ACCEL = 2.5   # m/s^2
+
+# Baseline recorded from route 000000fb--9b2ec00d7f on 2026-10-19 with the
+# driver demonstrating the required low-speed turn angle.  The model plan has
+# almost no usable lane paint at both turn locations, so its action curvature
+# collapses well below the demonstrated angle.  Interpolating angle against
+# 1/v reproduces the two recorded operating points and naturally softens the
+# target as speed rises.
+TURN_REFERENCE_SPEEDS = (2.639, 4.988)
+TURN_REFERENCE_ANGLES_DEG = (203.6, 114.0)
+TURN_REFERENCE_MAX_ANGLE_DEG = 220.0
+TURN_REFERENCE_MIN_SPEED_MPS = 1.0
+TURN_REFERENCE_PROGRESS_LEAD = 0.05
+TURN_MANUAL_START_PROGRESS = 0.30
+DEFAULT_STEER_RATIO = 12.0
+DEFAULT_WHEELBASE_M = 2.89
 
 LANE_MIN_PROB = 0.5
 LANE_MIN_WIDTH_M = 2.5
@@ -97,6 +121,28 @@ def _path_curvature(plan, t_idxs: np.ndarray, sign: float) -> tuple[float | None
 def _curvature_limit(v_ego: float) -> float:
   lateral_limit = MAX_TURN_LATERAL_ACCEL / max(v_ego * v_ego, 1.0)
   return max(0.0, min(MAX_TURN_CURVATURE, lateral_limit))
+
+
+def _recorded_turn_angle_deg(v_ego: float) -> float:
+  """Return the steering-wheel angle demonstrated by the driver."""
+  v_ego = max(float(v_ego), TURN_REFERENCE_MIN_SPEED_MPS)
+  inv_v = 1.0 / v_ego
+  v_slow, v_fast = TURN_REFERENCE_SPEEDS
+  angle_slow, angle_fast = TURN_REFERENCE_ANGLES_DEG
+  inv_slow, inv_fast = 1.0 / v_slow, 1.0 / v_fast
+  angle = angle_slow + (angle_fast - angle_slow) * (inv_v - inv_slow) / (inv_fast - inv_slow)
+  return float(np.clip(angle, 0.0, TURN_REFERENCE_MAX_ANGLE_DEG))
+
+
+def _recorded_turn_curvature(v_ego: float, steer_ratio: float,
+                             wheelbase: float) -> float:
+  """Convert the recorded wheel angle to road curvature."""
+  if not (math.isfinite(steer_ratio) and math.isfinite(wheelbase)):
+    return 0.0
+  if steer_ratio <= 0.0 or wheelbase <= 0.0:
+    return 0.0
+  road_angle = math.radians(_recorded_turn_angle_deg(v_ego)) / steer_ratio
+  return math.tan(road_angle) / wheelbase
 
 
 def _line_y(line, x_query: float) -> float | None:
@@ -167,7 +213,12 @@ def path_curvature_for_turn(plan, t_idxs, v_ego: float, action_t: float, turn_di
                             action_curvature: float = 0.0,
                             prev_curvature: float = 0.0,
                             dt: float = 0.05,
-                            lane_lines=None, lane_probs=None) -> float | None:
+                            lane_lines=None, lane_probs=None,
+                            steering_angle_deg: float = 0.0,
+                            steer_ratio: float = DEFAULT_STEER_RATIO,
+                            wheelbase: float = DEFAULT_WHEELBASE_M,
+                            manual_turn: bool = False,
+                            release_turn: bool = False) -> float | None:
   """Turn curvature that cannot snap back to straight in the middle of a turn.
 
   Returns None outside a turn or with an unusable plan so the caller keeps its
@@ -178,41 +229,76 @@ def path_curvature_for_turn(plan, t_idxs, v_ego: float, action_t: float, turn_di
   steer while the lamp is still asking for the turn.
   """
   sign = turn_sign(turn_direction)
-  if sign is None or plan is None or len(plan) == 0:
-    return None
+  settling = False
+  if sign is None:
+    # No lamp request remains, but a just-completed sharp turn can still be
+    # unwinding.  release_turn is supplied by modeld only after a real turn
+    # request ended, so ordinary low-speed curves keep normal lane following.
+    previous = float(prev_curvature)
+    if (release_turn and abs(previous) >= TURN_SETTLE_MIN_CURVATURE and
+        abs(float(steering_angle_deg)) >= TURN_SETTLE_MIN_ANGLE_DEG and
+        v_ego <= TURN_SETTLE_MAX_SPEED_MPS):
+      sign = 1.0 if previous > 0.0 else -1.0
+      settling = True
+    else:
+      return None
 
   t_idxs = np.asarray(t_idxs, dtype=np.float64)
-  trajectory = plan[0]
-  if trajectory.ndim != 2 or trajectory.shape[0] != len(t_idxs) or trajectory.shape[1] < 15:
-    return None
+  path_curvature = None
+  path_continues = False
+  if plan is not None and len(plan) > 0:
+    trajectory = plan[0]
+    if trajectory.ndim == 2 and trajectory.shape[0] == len(t_idxs) and trajectory.shape[1] >= 15:
+      path_curvature, path_continues, path_usable = _path_curvature(plan, t_idxs, sign)
+      if not path_usable:
+        # Keep the old near-horizon fallback for models whose plan has no
+        # usable position samples, but do not use it as the main low-speed
+        # estimator.
+        try:
+          path_curvature = float(get_curvature_from_plan(
+            trajectory[:, Plan.T_FROM_CURRENT_EULER][:, 2],
+            trajectory[:, Plan.ORIENTATION_RATE][:, 2],
+            t_idxs, v_ego, action_t,
+          ))
+        except (ValueError, IndexError):
+          path_curvature = None
+        if path_curvature is not None and not math.isfinite(path_curvature):
+          path_curvature = None
+        if path_curvature is not None:
+          if path_curvature * sign < -OPPOSITE_CURVATURE_EPS:
+            path_curvature = 0.0
+            path_continues = False
+          else:
+            path_continues = abs(path_curvature) > 0.003
 
-  path_curvature, path_continues, path_usable = _path_curvature(plan, t_idxs, sign)
-  if not path_usable:
-    # Keep the old near-horizon fallback for models whose plan has no usable
-    # position samples, but do not use it as the main low-speed estimator.
-    try:
-      path_curvature = float(get_curvature_from_plan(
-        trajectory[:, Plan.T_FROM_CURRENT_EULER][:, 2],
-        trajectory[:, Plan.ORIENTATION_RATE][:, 2],
-        t_idxs, v_ego, action_t,
-      ))
-    except (ValueError, IndexError):
-      return None
-    if not math.isfinite(path_curvature):
-      return None
-    if path_curvature * sign < -OPPOSITE_CURVATURE_EPS:
+  if path_curvature is None:
+    # A turn request is still active.  If the plan briefly becomes unusable
+    # (common at an intersection with no paint), hold the established command
+    # and release it through the normal rate limiter below.  Returning None
+    # here would let the action head snap the curvature and steering angle the
+    # other way in a single frame.
+    if abs(prev_curvature) >= TURN_START_EPS:
+      path_curvature = float(prev_curvature)
+      path_continues = True
+    elif settling:
       path_curvature = 0.0
-      path_continues = False
+    elif not manual_turn:
+      return None
     else:
-      path_continues = abs(path_curvature) > 0.003
-  elif path_curvature is None:
-    return None
+      path_curvature = 0.0
 
   action_mag = max(float(action_curvature) * sign, 0.0)
   prev_mag = max(float(prev_curvature) * sign, 0.0)
   path_mag = max(path_curvature * sign, 0.0)
 
-  target_mag = action_mag
+  # The camera's lane lines are the primary evidence near the end of a turn.
+  # When they are not trustworthy (common at an intersection or in a car park),
+  # use the recorded driver angle as a floor so the action head cannot collapse
+  # to a shallow arc while the plan still says the turn continues.
+  lookahead = float(np.clip(v_ego * 2.0, 4.0, 10.0))
+  lane = _lane_state(lane_lines, lane_probs, lookahead)
+
+  target_mag = 0.0 if settling else action_mag
   if path_continues and path_mag > 0.0 and prev_mag <= TURN_START_EPS:
     # At entry the action head can lag the visible path.  Use the path only to
     # get the turn moving, with a hard cap.  Once a turn is established the
@@ -220,6 +306,23 @@ def path_curvature_for_turn(plan, t_idxs, v_ego: float, action_t: float, turn_di
     # noisy far-horizon path would ratchet the wheel tighter every frame.
     target_mag = max(target_mag, min(path_mag, TURN_START_ASSIST_MAX))
   limit = _curvature_limit(v_ego)
+  wheel_angle = float(steering_angle_deg)
+  # Wheel angle is left-positive while turn curvature is left-negative.  Do
+  # not use a driver's counter-steer as evidence that the maneuver is
+  # progressing.
+  turn_progress_angle = abs(wheel_angle) if wheel_angle * -sign > 0.0 else 0.0
+  # A driver lamp alone starts the turn, so there is no observed wheel angle
+  # to follow at entry.  Begin at a fixed fraction of the recorded angle and
+  # let the measured wheel angle take over as the car follows the path.
+  if (not settling and lane is None and v_ego >= TURN_REFERENCE_MIN_SPEED_MPS and
+      (path_continues or manual_turn)):
+    reference_angle = _recorded_turn_angle_deg(v_ego)
+    progress = turn_progress_angle / max(reference_angle, 1.0) + TURN_REFERENCE_PROGRESS_LEAD
+    if manual_turn:
+      progress = max(progress, TURN_MANUAL_START_PROGRESS)
+    progress = min(1.0, progress)
+    reference_mag = _recorded_turn_curvature(v_ego, steer_ratio, wheelbase) * progress
+    target_mag = max(target_mag, min(reference_mag, limit))
   target_mag = min(target_mag, limit)
   prev_mag = min(prev_mag, limit)
 
@@ -228,18 +331,22 @@ def path_curvature_for_turn(plan, t_idxs, v_ego: float, action_t: float, turn_di
 
   dt = float(np.clip(dt, 0.01, 0.1))
   if target_mag >= prev_mag:
-    held_mag = target_mag if prev_mag <= 0.0 else min(target_mag, prev_mag + TURN_ATTACK_RATE * dt)
+    if prev_mag <= 0.0:
+      held_mag = min(target_mag, TURN_START_ASSIST_MAX)
+    else:
+      held_mag = min(target_mag, prev_mag + TURN_ATTACK_RATE * dt)
   else:
-    release_rate = TURN_HOLD_RELEASE_RATE if path_continues else TURN_FAST_RELEASE_RATE
+    if settling:
+      release_rate = TURN_SETTLE_RELEASE_RATE
+    else:
+      release_rate = TURN_HOLD_RELEASE_RATE if path_continues else TURN_FAST_RELEASE_RATE
     held_mag = max(target_mag, prev_mag - release_rate * dt)
 
   # The main camera's lane lines decide whether the new lane is actually
   # reached.  A car that is aligned and centred in a confident lane is done
   # turning even if the far end of the model plan still drifts left/right.
-  lookahead = float(np.clip(v_ego * 2.0, 4.0, 10.0))
-  lane = _lane_state(lane_lines, lane_probs, lookahead)
   lane_correction = 0.0
-  if lane is not None:
+  if lane is not None and not settling:
     center0, center_ahead, width0, _, lane_heading = lane
     straddling = abs(center0) > max(0.0, width0 / 2.0 - LANE_EDGE_MARGIN_M)
     # At turn entry the car is still centred and aligned in the old lane, so

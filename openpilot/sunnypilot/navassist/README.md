@@ -175,11 +175,12 @@ gate is blocked. It requests the physical lamp only when one SP lane-change
 attempt can start, then holds that lamp through the existing SP cycle. A
 navigation lane-change lamp is excluded from LaneTurnDesire. A true turn-only
 navigation request may create turnLeft/turnRight desire. Without navigation, a
-driver lamp plus steering in the signaled direction may do the same in the
-low-speed turn window, including the lane-change boundary margin; this keeps an
-intersection turn from being planned as a shallow lane change. The driver
-intent is latched with steering hysteresis, so small movement around center
-does not repeatedly reset the turn path.
+single driver lamp inside the low-speed turn window is itself the complete turn
+request and creates turnLeft/turnRight desire; no steering confirmation is
+needed. This keeps an intersection turn from being planned as a shallow lane
+change even when the wheel is still centred at a red light. Above the 20 mph
+lane-change boundary the same lamp remains an ordinary lane change. The intent
+lasts as long as the lamp is held and ends when the lamp is cancelled.
 When a new same-direction turn request takes ownership of a still-lit lamp,
 the previous lane-change tail no longer masks that turn from the model. The
 model's original rising-edge desire input is preserved. Entering the existing
@@ -205,6 +206,12 @@ still cancel the event. SCC-V and navigation compete through the existing minimu
 speed-target selection every cycle, so a lower SCC-V target wins and a transient
 SCC-V release cannot discard the navigation ceiling for the rest of the turn.
 The deceleration is attributed to the approaching maneuver, not to the lateral request.
+The same `turn_speed_kph` ceiling (default 18 km/h, 5.0 m/s) is also applied to a
+driver-signaled low-speed turn. It arms as soon as one lamp is on at or below
+30 km/h, including from a standstill at the light, and only lowers the target
+already selected by cruise/SCC/SLA/navigation. It never requests acceleration
+and releases at 1.0 m/s² after the lamp clears, or after the wheel has returned
+to centre for 0.75 s if a lamp was left on.
 Within one continuous route revision, maneuver-event advancement retains the
 lamp until model-derived turn geometry has stayed clear for 0.5 seconds.
 

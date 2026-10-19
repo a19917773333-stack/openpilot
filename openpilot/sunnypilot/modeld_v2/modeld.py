@@ -32,11 +32,8 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import config_realtime_process, DT_MDL
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.transformations.model import get_warp_matrix
-from openpilot.selfdrive.controls.lib.desire_helper import (
-  DesireHelper,
-  get_lane_turn_curvature_scale,
-  scale_turn_curvature,
-)
+from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
+from openpilot.sunnypilot.selfdrive.controls.lib.turn_entry import TurnEntryGate, TurnCompletionTracker
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, get_curvature_from_plan, smooth_value
 from openpilot.selfdrive.modeld.modeld import ChestnutGpuState
 from openpilot.sunnypilot.modeld_v2.egpu_loader import C3XL_MODEL_LOAD_TIMEOUT
@@ -48,7 +45,6 @@ from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
-from openpilot.sunnypilot.modeld_v2.turn_curvature import path_curvature_for_turn
 from openpilot.sunnypilot.modeld_v2.helpers import MAGIC, load_model
 from openpilot.sunnypilot.modeld_v2.frame_fusion import fused_with_warp
 from tinygrad.engine.realize import lower_and_compile
@@ -277,8 +273,7 @@ class ModelState(ModelStateBase):
     return outputs
 
   def get_action_from_model(self, model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
-                            lat_action_t: float, long_action_t: float, v_ego: float,
-                            turn_direction: int = 0, turn_curvature_scale: float = 1.0) -> log.ModelDataV2.Action:
+                            lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
     if 'action' not in model_output:
       plan = model_output['plan'][0]
       desired_accel = get_accel_from_plan(plan[:, Plan.VELOCITY][:, 0], plan[:, Plan.ACCELERATION][:, 0], self.constants.T_IDXS,
@@ -291,13 +286,6 @@ class ModelState(ModelStateBase):
       desired_accel = model_output['action'][0, 1]
       desired_curvature = model_output['action'][0, 0] / (max(1.0, v_ego))**2
 
-    scaled_curvature = scale_turn_curvature(desired_curvature, turn_direction, turn_curvature_scale)
-    path_curvature = path_curvature_for_turn(
-      model_output.get('plan'), self.constants.T_IDXS, v_ego, lat_action_t, turn_direction,
-      action_curvature=scaled_curvature, prev_curvature=prev_action.desiredCurvature,
-      lane_lines=model_output.get('lane_lines'), lane_probs=model_output.get('lane_lines_prob'),
-    )
-    desired_curvature = path_curvature if path_curvature is not None else scaled_curvature
     stop = v_ego < 0.3 and desired_accel < 0.1
     desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, self.LONG_SMOOTH_SECONDS)
 
@@ -411,7 +399,6 @@ def main(demo=False):
   frame_id = 0
   last_vipc_frame_id = 0
   run_count = 0
-  turn_pulse_armed = False
 
   model_transform_main = np.zeros((3, 3), dtype=np.float32)
   model_transform_extra = np.zeros((3, 3), dtype=np.float32)
@@ -433,7 +420,8 @@ def main(demo=False):
   prev_action = log.ModelDataV2.Action()
 
   DH = DesireHelper()
-  turn_curvature_scale = get_lane_turn_curvature_scale(params)
+  turn_entry = TurnEntryGate()
+  turn_completion = TurnCompletionTracker(CP.steerActuatorDelay)
   meta_constants = load_meta_constants()
   RELC = RoadEdgeLaneChangeController()
 
@@ -479,7 +467,6 @@ def main(demo=False):
       model.lat_delay = get_lat_delay(params, sm["lateralDelay"].lateralDelay)
       model.PLANPLUS_CONTROL = params.get("PlanplusControl", return_default=True)
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
-      turn_curvature_scale = get_lane_turn_curvature_scale(params)
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
     if sm.updated["extrinsicsCalibration"] and sm.seen['narrowRoadCameraState'] and sm.seen['deviceState']:
       device_from_calib_euler = np.array(sm["extrinsicsCalibration"].rpyCalib, dtype=np.float32)
@@ -496,19 +483,6 @@ def main(demo=False):
     vec_desire = np.zeros(model.constants.DESIRE_LEN, dtype=np.float32)
     if desire >= 0 and desire < model.constants.DESIRE_LEN:
       vec_desire[desire] = 1
-    # The model consumes desire as a one-frame rising edge, and its internal
-    # turn plan fades while the car waits at a light. Re-arm the pulse when
-    # pulling away so a lamp that stayed on still plans the turn.
-    if v_ego < 0.2:
-      turn_pulse_armed = True
-    elif turn_pulse_armed and v_ego > 0.5 and desire != log.Desire.none:
-      prev_desire = getattr(model, "prev_desire", None)
-      if prev_desire is not None:
-        prev_desire[:] = 0
-      else:
-        vec_desire[:] = 0
-      turn_pulse_armed = False
-
     # tracked dropped frames
     vipc_dropped_frames = max(0, meta_main.frame_id - last_vipc_frame_id - 1)
     frames_dropped = frame_dropped_filter.update(min(vipc_dropped_frames, 10))
@@ -573,9 +547,7 @@ def main(demo=False):
       mdv2sp_send = messaging.new_message('modelDataV2SP')
       mdv2sp_send.modelDataV2SP.acceleratorState = getattr(model, 'big_model_state', 'none')
 
-      action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
-                                           turn_direction=DH.lane_turn_direction,
-                                           turn_curvature_scale=turn_curvature_scale)
+      action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
       fill_model_msg(drivingdata_send, modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
                      frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, live_calib_seen, meta_constants)
@@ -609,13 +581,52 @@ def main(demo=False):
         topology, side="right", healthy=lane_topology_healthy,
         allow_unknown=right_unknown, ignore_solid=right_ignore_solid,
       )
+      gate_now_ns = time.monotonic_ns()
+      neighbors = ((bool(topology.leftNeighborExists), bool(topology.rightNeighborExists))
+                   if lane_topology_healthy else (None, None))
+      left_turn, right_turn = turn_entry.update(
+        modelv2_send.modelV2, topology, healthy=lane_topology_healthy,
+        now_ns=gate_now_ns, model_stamp_ns=meta_main.timestamp_eof,
+        neighbors=neighbors, safety_blocks=(False, False),
+        carstate=sm['carState'],
+        model_healthy=live_calib_seen and sm.all_checks(['carState', 'carControl']),
+        nav_intent=nav_lane_intent,
+        nav_state=sm['navAssistStateSP'] if sm.all_checks(['navAssistStateSP']) else None,
+      )
+      turn_permissions = dict(
+        turn_soft_reentry=True,
+        left_turn_allowed=left_turn, right_turn_allowed=right_turn,
+        left_neighbor_exists=turn_entry.neighbors[0], right_neighbor_exists=turn_entry.neighbors[1],
+        left_turn_keep_allowed=turn_entry.keep_allowed[0],
+        right_turn_keep_allowed=turn_entry.keep_allowed[1],
+        turn_completed=turn_completion.update(
+          modelv2_send.modelV2, sm['carState'],
+          active=sm['carControl'].latActive and DH.turn_maneuver.state == 'active',
+          model_stamp_ns=meta_main.timestamp_eof, now_ns=gate_now_ns,
+        ),
+      )
       DH.update(
         sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge,
         nav_lane_intent=nav_lane_intent,
         left_line_blocked=left_line_blocked, right_line_blocked=right_line_blocked,
         left_crossing_allowed=left_crossing_allowed,
         right_crossing_allowed=right_crossing_allowed,
+        **turn_permissions,
       )
+      if DH.turn_maneuver.state == 'active':
+        # Keep turn control on the same model plan published for the displayed path.
+        plan = model_output['plan'][0]
+        turn_curvature = get_curvature_from_plan(
+          plan[:, Plan.T_FROM_CURRENT_EULER][:, 2], plan[:, Plan.ORIENTATION_RATE][:, 2],
+          model.constants.T_IDXS, v_ego, lat_action_t,
+        )
+        if v_ego > getattr(model, 'MIN_LAT_CONTROL_SPEED', 0.3):
+          turn_curvature = smooth_value(turn_curvature, prev_action.desiredCurvature, model.LAT_SMOOTH_SECONDS)
+        else:
+          turn_curvature = prev_action.desiredCurvature
+        action.desiredCurvature = float(turn_curvature)
+        modelv2_send.modelV2.action.desiredCurvature = action.desiredCurvature
+        drivingdata_send.drivingModelData.action.desiredCurvature = action.desiredCurvature
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       mdv2sp_send.valid = modelv2_send.valid

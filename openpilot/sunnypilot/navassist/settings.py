@@ -38,11 +38,11 @@ SETTING_SPECS = {
   'enabled': SettingSpec('导航联动', '关闭后仍接收和显示手机导航，不发起导航变道、转弯灯或转弯减速。'),
   'lane_change_enabled': SettingSpec('导航自动靠边变道', '按导航目标请求 SP 原有变道功能；变道灯随此开关，仍执行现有标线、路缘和盲区判断。'),
   'turn_signal_enabled': SettingSpec('转弯提前打灯', '控制路口转弯的灯光请求；不影响自动变道需要的转向灯。'),
-  'turn_slowdown_enabled': SettingSpec('导航转弯减速', '通过公共速度目标支持三套纵向；普通靠边变道本身不触发减速。'),
+  'turn_slowdown_enabled': SettingSpec('转弯减速', '通过公共速度目标支持三套纵向；导航转弯和打灯低速转弯都减速，普通靠边变道不触发。'),
   'turn_lane_lookahead_m': SettingSpec('普通路口靠边提前距离', '进入此距离后才考虑为左转或右转靠边。', 100, 1500, 50, 'm'),
   'exit_lane_lookahead_m': SettingSpec('出口与匝道靠边提前距离', '进入此距离后才考虑为出口或匝道靠边。', 300, 3000, 100, 'm'),
   'signal_lead_time_s': SettingSpec('转弯打灯提前时间', '按当前车速换算距离，保留现有 40–250 米范围和距离余量。', 3, 12, 1, 's'),
-  'turn_speed_kph': SettingSpec('普通转弯目标速度', '适用于普通左转/右转；急转、掉头与匝道保留各自目标。具体减速由所选纵向执行。', 10, 30, 1, 'km/h'),
+  'turn_speed_kph': SettingSpec('普通转弯目标速度', '适用于普通左转/右转和打灯低速转弯；急转、掉头与匝道保留各自目标。具体减速由所选纵向执行。', 10, 30, 1, 'km/h'),
   'max_lane_changes': SettingSpec('单路口连续变道次数', '同一导航事件最多请求的已完成变道次数。每次仍需重新确认车道条件。', 1, 5, 1, '次'),
   'logging_enabled': SettingSpec('独立导航日志', '单独记录导航、车道、灯光和控制上下文；网页独立下载，自动轮转且最多占用 128 MiB。'),
 }

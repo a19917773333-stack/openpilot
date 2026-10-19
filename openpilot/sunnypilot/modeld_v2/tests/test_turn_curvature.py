@@ -6,7 +6,13 @@ import numpy as np
 
 from openpilot.cereal import custom
 from openpilot.sunnypilot.modeld_v2.constants import ModelConstants, Plan
-from openpilot.sunnypilot.modeld_v2.turn_curvature import path_curvature_for_turn
+from openpilot.sunnypilot.modeld_v2.turn_curvature import (
+  TURN_START_ASSIST_MAX,
+  _curvature_limit,
+  _recorded_turn_angle_deg,
+  _recorded_turn_curvature,
+  path_curvature_for_turn,
+)
 
 
 TurnDirection = custom.ModelDataV2SP.TurnDirection
@@ -68,12 +74,65 @@ def test_no_turn_does_not_override_action_curvature():
   ) is None
 
 
+def test_ordinary_low_speed_curve_is_not_treated_as_turn_release():
+  assert path_curvature_for_turn(
+    _plan(-0.01), ModelConstants.T_IDXS, 2.0, 0.5, TurnDirection.none,
+    action_curvature=-0.02, prev_curvature=0.10, dt=0.05,
+    steering_angle_deg=-150.0, release_turn=False,
+  ) is None
+
+
 def test_malformed_plan_falls_back():
   assert path_curvature_for_turn(
     _plan(-0.01, length=len(ModelConstants.T_IDXS) - 1),
     ModelConstants.T_IDXS, 10.0, 0.5, TurnDirection.turnLeft,
   ) is None
   assert path_curvature_for_turn(None, ModelConstants.T_IDXS, 10.0, 0.5, TurnDirection.turnLeft) is None
+
+
+def test_malformed_plan_holds_an_established_turn():
+  curvature = path_curvature_for_turn(
+    None, ModelConstants.T_IDXS, 2.0, 0.5, TurnDirection.turnLeft,
+    action_curvature=-0.01, prev_curvature=-0.10, dt=0.05,
+  )
+  assert curvature is not None
+  assert curvature <= -0.09
+
+
+def test_unusable_low_speed_plan_does_not_snap_to_the_action_head():
+  # At walking speed the first five seconds of the plan may cover less than
+  # the minimum arc used by the path estimator.  That must not release a
+  # sharp turn in one frame.
+  curvature = path_curvature_for_turn(
+    _plan(0.0, v_ego=0.5), ModelConstants.T_IDXS, 1.5, 0.5, TurnDirection.turnRight,
+    action_curvature=0.01, prev_curvature=0.10, dt=0.05,
+  )
+  assert curvature is not None
+  assert curvature >= 0.09
+
+
+def test_after_lamp_off_settles_in_the_same_direction():
+  previous = 0.10
+  for _ in range(80):
+    result = path_curvature_for_turn(
+      _plan(-0.01), ModelConstants.T_IDXS, 2.0, 0.5, TurnDirection.none,
+      action_curvature=-0.02, prev_curvature=previous, dt=0.05,
+      steering_angle_deg=-150.0, release_turn=True,
+    )
+    if result is None:
+      break
+    assert result >= 0.0
+    assert result <= previous + 1e-6
+    previous = result
+  assert previous < 0.02
+
+
+def test_settle_does_not_run_once_the_wheel_is_centred():
+  assert path_curvature_for_turn(
+    _plan(-0.01), ModelConstants.T_IDXS, 2.0, 0.5, TurnDirection.none,
+    action_curvature=-0.02, prev_curvature=0.10, dt=0.05,
+    steering_angle_deg=0.0, release_turn=True,
+  ) is None
 
 
 def test_hold_prevents_mid_turn_collapse():
@@ -85,13 +144,117 @@ def test_hold_prevents_mid_turn_collapse():
   assert curvature < -0.026
 
 
-def test_path_does_not_ratchet_after_turn_starts():
+def test_path_does_not_jump_past_recorded_floor():
   curvature = path_curvature_for_turn(
     _plan(-0.08), ModelConstants.T_IDXS, 4.2, 0.5, TurnDirection.turnLeft,
     action_curvature=-0.01, prev_curvature=-0.02, dt=0.05,
   )
   assert curvature is not None
-  assert abs(curvature) <= 0.02 + 1e-6
+  assert abs(curvature) <= _recorded_turn_curvature(4.2, 12.0, 2.89) + 1e-6
+
+
+def test_recorded_reference_angles_match_baseline():
+  assert abs(_recorded_turn_angle_deg(4.988) - 114.0) < 0.2
+  assert abs(_recorded_turn_angle_deg(2.639) - 203.6) < 0.2
+
+
+def test_low_speed_limit_allows_recorded_angles():
+  assert _curvature_limit(2.639) >= _recorded_turn_curvature(2.639, 12.0, 2.89) - 1e-6
+  assert _curvature_limit(4.988) >= _recorded_turn_curvature(4.988, 12.0, 2.89) - 1e-6
+
+
+def _hold_turn(v_ego: float, direction, action_curvature: float, frames: int = 120,
+               lane_prob: float = 0.01, steering_angle_deg: float = 0.0) -> float:
+  lanes, probs = _lanes(prob=lane_prob)
+  curvature = 0.0
+  for _ in range(frames):
+    result = path_curvature_for_turn(
+      _plan(-0.005 if direction == TurnDirection.turnLeft else 0.005),
+      ModelConstants.T_IDXS, v_ego, 0.5, direction,
+      action_curvature=action_curvature, prev_curvature=curvature, dt=0.05,
+      lane_lines=lanes, lane_probs=probs, steering_angle_deg=steering_angle_deg,
+    )
+    assert result is not None
+    curvature = result
+  return curvature
+
+
+def test_recorded_left_angle_is_reached_without_lane_paint():
+  curvature = _hold_turn(4.988, TurnDirection.turnLeft, -0.016, steering_angle_deg=114.0)
+  expected = -_recorded_turn_curvature(4.988, 12.0, 2.89)
+  assert abs(curvature - expected) < 0.004
+
+
+def test_recorded_right_angle_is_reached_without_lane_paint():
+  curvature = _hold_turn(2.639, TurnDirection.turnRight, 0.015, steering_angle_deg=-203.6)
+  expected = _recorded_turn_curvature(2.639, 12.0, 2.89)
+  assert abs(curvature - expected) < 0.004
+
+
+def test_recorded_floor_starts_through_entry_cap():
+  lanes, probs = _lanes(prob=0.01)
+  curvature = path_curvature_for_turn(
+    _plan(0.005), ModelConstants.T_IDXS, 2.639, 0.5, TurnDirection.turnRight,
+    action_curvature=0.0, prev_curvature=0.0, dt=0.05,
+    lane_lines=lanes, lane_probs=probs,
+  )
+  assert curvature is not None
+  assert 0.0 < curvature <= TURN_START_ASSIST_MAX + 1e-6
+
+
+def test_signaled_turn_starts_from_a_straight_model_plan():
+  curvature = path_curvature_for_turn(
+    _plan(-0.0004), ModelConstants.T_IDXS, 4.988, 0.5, TurnDirection.turnLeft,
+    action_curvature=-0.0004, prev_curvature=0.0, dt=0.05,
+    steering_angle_deg=0.0, manual_turn=True,
+  )
+  assert curvature is not None
+  assert curvature < -0.005
+
+
+def test_straight_plan_without_a_turn_request_stays_straight():
+  curvature = path_curvature_for_turn(
+    _plan(-0.0004), ModelConstants.T_IDXS, 4.988, 0.5, TurnDirection.turnLeft,
+    action_curvature=-0.0004, prev_curvature=0.0, dt=0.05,
+    steering_angle_deg=0.0,
+  )
+  assert curvature is not None
+  assert abs(curvature) < 0.003
+
+
+def test_recorded_floor_follows_observed_angle():
+  lanes, probs = _lanes(prob=0.01)
+  curvature = path_curvature_for_turn(
+    _plan(-0.005), ModelConstants.T_IDXS, 4.988, 0.5, TurnDirection.turnLeft,
+    action_curvature=-0.016, prev_curvature=-0.03, dt=0.05,
+    lane_lines=lanes, lane_probs=probs, steering_angle_deg=57.0,
+  )
+  assert curvature is not None
+  full = _recorded_turn_curvature(4.988, 12.0, 2.89)
+  expected = full * (57.0 / 114.0 + 0.05)
+  assert abs(curvature + expected) < 0.003
+
+
+def test_recorded_floor_ignores_counter_steer():
+  lanes, probs = _lanes(prob=0.01)
+  curvature = path_curvature_for_turn(
+    _plan(-0.005), ModelConstants.T_IDXS, 4.988, 0.5, TurnDirection.turnLeft,
+    action_curvature=-0.005, prev_curvature=-0.03, dt=0.05,
+    lane_lines=lanes, lane_probs=probs, steering_angle_deg=-57.0,
+  )
+  assert curvature is not None
+  assert abs(curvature) < 0.0305
+
+
+def test_recorded_floor_is_disabled_when_camera_lane_is_confident():
+  lanes, probs = _lanes(heading=0.5)
+  curvature = path_curvature_for_turn(
+    _plan(-0.005), ModelConstants.T_IDXS, 4.988, 0.5, TurnDirection.turnLeft,
+    action_curvature=-0.005, prev_curvature=-0.02, dt=0.05,
+    lane_lines=lanes, lane_probs=probs,
+  )
+  assert curvature is not None
+  assert abs(curvature) < 0.02
 
 
 def test_opposite_path_releases_without_counter_steer():
