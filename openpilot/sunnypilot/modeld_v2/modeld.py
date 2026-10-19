@@ -37,7 +37,7 @@ from openpilot.selfdrive.controls.lib.desire_helper import (
   get_lane_turn_curvature_scale,
   scale_turn_curvature,
 )
-from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value
+from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, get_curvature_from_plan, smooth_value
 from openpilot.selfdrive.modeld.modeld import ChestnutGpuState
 from openpilot.sunnypilot.modeld_v2.egpu_loader import C3XL_MODEL_LOAD_TIMEOUT
 
@@ -48,11 +48,13 @@ from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
+from openpilot.sunnypilot.modeld_v2.turn_curvature import path_curvature_for_turn
 from openpilot.sunnypilot.modeld_v2.helpers import MAGIC, load_model
 from openpilot.sunnypilot.modeld_v2.frame_fusion import fused_with_warp
 from tinygrad.engine.realize import lower_and_compile
 from openpilot.selfdrive.modeld.helpers import load_oob as load_stock_oob
 from openpilot.sunnypilot.modeld_v2.model_adapters import get_model_adapter
+
 from openpilot.sunnypilot.models.helpers import get_active_bundle
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_change_blocker import (
   LaneChangeBoundaryBlocker,
@@ -275,7 +277,8 @@ class ModelState(ModelStateBase):
     return outputs
 
   def get_action_from_model(self, model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
-                            lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
+                            lat_action_t: float, long_action_t: float, v_ego: float,
+                            turn_direction: int = 0, turn_curvature_scale: float = 1.0) -> log.ModelDataV2.Action:
     if 'action' not in model_output:
       plan = model_output['plan'][0]
       desired_accel = get_accel_from_plan(plan[:, Plan.VELOCITY][:, 0], plan[:, Plan.ACCELERATION][:, 0], self.constants.T_IDXS,
@@ -288,6 +291,13 @@ class ModelState(ModelStateBase):
       desired_accel = model_output['action'][0, 1]
       desired_curvature = model_output['action'][0, 0] / (max(1.0, v_ego))**2
 
+    path_curvature = path_curvature_for_turn(
+      model_output.get('plan'), self.constants.T_IDXS, v_ego, lat_action_t, turn_direction,
+    )
+    if path_curvature is not None:
+      desired_curvature = path_curvature
+    else:
+      desired_curvature = scale_turn_curvature(desired_curvature, turn_direction, turn_curvature_scale)
     stop = v_ego < 0.3 and desired_accel < 0.1
     desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, self.LONG_SMOOTH_SECONDS)
 
@@ -563,7 +573,9 @@ def main(demo=False):
       mdv2sp_send = messaging.new_message('modelDataV2SP')
       mdv2sp_send.modelDataV2SP.acceleratorState = getattr(model, 'big_model_state', 'none')
 
-      action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
+      action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
+                                           turn_direction=DH.lane_turn_direction,
+                                           turn_curvature_scale=turn_curvature_scale)
       fill_model_msg(drivingdata_send, modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
                      frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, live_calib_seen, meta_constants)
@@ -610,9 +622,6 @@ def main(demo=False):
       mdv2sp_send.modelDataV2SP.laneTurnDirection = DH.lane_turn_direction
       drivingdata_send.drivingModelData.meta.laneChangeState = DH.lane_change_state
       drivingdata_send.drivingModelData.meta.laneChangeDirection = DH.lane_change_direction
-      action.desiredCurvature = scale_turn_curvature(
-        action.desiredCurvature, DH.lane_turn_direction, turn_curvature_scale,
-      )
       modelv2_send.modelV2.action.desiredCurvature = action.desiredCurvature
       drivingdata_send.drivingModelData.action.desiredCurvature = action.desiredCurvature
       prev_action = action

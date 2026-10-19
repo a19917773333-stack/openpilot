@@ -15,7 +15,6 @@ from tinygrad.dtype import DType, dtypes
 from tinygrad.tensor import Tensor
 from tinygrad.helpers import GlobalCounters, round_up
 from tinygrad.uop.ops import UOp
-import math
 import pickle
 import threading
 import time
@@ -50,6 +49,7 @@ from openpilot.system.hardware.chestnut.status import read_runtime_asm_telemetry
 from openpilot.sunnypilot import jetlink_adapter
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
+from openpilot.sunnypilot.modeld_v2.turn_curvature import path_curvature_for_turn
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_change_blocker import (
   LaneChangeBoundaryBlocker,
   lane_topology_nav_crossing_allowed,
@@ -64,9 +64,9 @@ LONG_SMOOTH_SECONDS = 0.3
 MIN_LAT_CONTROL_SPEED = 0.3
 BIG_MODEL_TIMEOUT = C3XL_MODEL_LOAD_TIMEOUT
 
-
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
-                          lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
+                          lat_action_t: float, long_action_t: float, v_ego: float,
+                          turn_direction: int = 0, turn_curvature_scale: float = 1.0) -> log.ModelDataV2.Action:
   if 'action' not in model_output:
     plan = model_output['plan'][0]
     desired_accel = get_accel_from_plan(plan[:,Plan.VELOCITY][:,0],
@@ -81,6 +81,14 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
   else:
     desired_accel = model_output['action'][0,1]
     desired_curvature = model_output['action'][0,0] / (max(1.0, v_ego))**2
+
+  path_curvature = path_curvature_for_turn(
+    model_output.get('plan'), ModelConstants.T_IDXS, v_ego, lat_action_t, turn_direction,
+  )
+  if path_curvature is not None:
+    desired_curvature = path_curvature
+  else:
+    desired_curvature = scale_turn_curvature(desired_curvature, turn_direction, turn_curvature_scale)
   stop = should_stop(v_ego, desired_accel)
   desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, LONG_SMOOTH_SECONDS)
   if v_ego > MIN_LAT_CONTROL_SPEED:
@@ -505,7 +513,9 @@ def main(demo=False):
       posenet_send = messaging.new_message('cameraOdometry')
       mdv2sp_send = messaging.new_message('modelDataV2SP')
 
-      action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
+      action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
+                                     turn_direction=DH.lane_turn_direction,
+                                     turn_curvature_scale=turn_curvature_scale)
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
                      frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, extrinsics_calibration_seen)
@@ -550,9 +560,6 @@ def main(demo=False):
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       mdv2sp_send.valid = modelv2_send.valid
       mdv2sp_send.modelDataV2SP.laneTurnDirection = DH.lane_turn_direction
-      action.desiredCurvature = scale_turn_curvature(
-        action.desiredCurvature, DH.lane_turn_direction, turn_curvature_scale,
-      )
       modelv2_send.modelV2.action.desiredCurvature = action.desiredCurvature
       drivingdata_send.drivingModelData.action.desiredCurvature = action.desiredCurvature
       prev_action = action
