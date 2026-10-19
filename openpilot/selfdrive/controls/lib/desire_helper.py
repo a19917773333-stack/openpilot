@@ -1,5 +1,6 @@
 from openpilot.cereal import log, custom
 from openpilot.common.constants import CV
+from openpilot.common.params import UnknownKeyName
 from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot.selfdrive.controls.lib.auto_lane_change import AutoLaneChangeController, AutoLaneChangeMode
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_turn_desire import LaneTurnController
@@ -34,7 +35,7 @@ def get_lane_turn_curvature_scale(params) -> float:
     if isinstance(raw, bytes):
       raw = raw.decode("utf-8", errors="ignore")
     value = float(raw or LANE_TURN_CURVATURE_SCALE_DEFAULT)
-  except (TypeError, ValueError):
+  except (TypeError, ValueError, UnknownKeyName):
     value = LANE_TURN_CURVATURE_SCALE_DEFAULT
   return min(max(value, LANE_TURN_CURVATURE_SCALE_MIN), LANE_TURN_CURVATURE_SCALE_MAX)
 

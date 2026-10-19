@@ -1,4 +1,5 @@
 from openpilot.cereal import custom
+from openpilot.common.params import UnknownKeyName
 from openpilot.common.parameterized import parameterized
 from openpilot.common.test import OpenpilotTestCase
 
@@ -24,9 +25,17 @@ class FakeParams:
     return self.value
 
 
+class UnknownParams:
+  def get(self, key):
+    raise UnknownKeyName(key)
+
+
 class TestTurnCurvatureScale(OpenpilotTestCase):
   def test_missing_param_uses_default(self):
     self.assertAlmostEqual(get_lane_turn_curvature_scale(FakeParams()), LANE_TURN_CURVATURE_SCALE_DEFAULT)
+
+  def test_unregistered_param_uses_default_instead_of_crashing(self):
+    self.assertAlmostEqual(get_lane_turn_curvature_scale(UnknownParams()), LANE_TURN_CURVATURE_SCALE_DEFAULT)
 
   @parameterized.expand([(b"0.70", 0.70), ("0.80", 0.80), (0.75, 0.75)])
   def test_accepts_bytes_str_and_float(self, raw, expected):
