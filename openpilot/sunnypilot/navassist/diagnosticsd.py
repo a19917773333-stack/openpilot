@@ -35,7 +35,14 @@ def collect_sample(sm, *, wall_ms: int, mono_ns: int) -> dict:
         'leftBlinker', 'rightBlinker', 'leftBlindspot', 'rightBlindspot', 'vCruise',
       )}
     elif name == 'carStateSP':
-      signals[name] = {'flags': value.flags}
+      signals[name] = {
+        'flags': value.flags,
+        'teslaRoadContext': {
+          'available': value.teslaRoadContext.available,
+          'trafficLightColor': value.teslaRoadContext.trafficLightColor,
+          'stopLineDistance': value.teslaRoadContext.stopLineDistance,
+        },
+      }
     elif name == 'carControl':
       signals[name] = {'enabled': value.enabled, 'latActive': value.latActive, 'longActive': value.longActive,
                        'override': value.cruiseControl.override, 'actuators': value.actuators.to_dict()}

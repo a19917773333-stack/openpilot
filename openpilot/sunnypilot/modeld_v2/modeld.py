@@ -33,7 +33,7 @@ from openpilot.common.realtime import config_realtime_process, DT_MDL
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
-from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value
+from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, get_curvature_from_plan, smooth_value
 from openpilot.selfdrive.modeld.modeld import ChestnutGpuState
 from openpilot.sunnypilot.modeld_v2.egpu_loader import C3XL_MODEL_LOAD_TIMEOUT
 
@@ -56,6 +56,10 @@ from openpilot.sunnypilot.selfdrive.controls.lib.lane_change_blocker import (
   nav_lane_crossing_policy,
 )
 from openpilot.sunnypilot.selfdrive.controls.lib.relc import RoadEdgeLaneChangeController
+from openpilot.sunnypilot.selfdrive.controls.lib.turn_entry import (
+  TurnCompletionTracker,
+  TurnEntryGate,
+)
 
 PROCESS_NAME = "openpilot.selfdrive.modeld.modeld_tinygrad"
 BIG_MODEL_TIMEOUT = C3XL_MODEL_LOAD_TIMEOUT
@@ -385,7 +389,7 @@ def main(demo=False):
   pm = PubMaster(pub_socks)
   sm = SubMaster([
     "deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState",
-    "carControl", "carControlSP", "lateralDelay", "navLaneIntentSP", "laneTopologyStateSP", "navAssistStateSP",
+    "carControl", "carControlSP", "lateralDelay", "navLaneIntentSP", "laneTopologyStateSP",
   ], frequency=model.constants.MODEL_FREQ)
 
   publish_state = PublishState()
@@ -418,6 +422,8 @@ def main(demo=False):
   prev_action = log.ModelDataV2.Action()
 
   DH = DesireHelper()
+  turn_entry = TurnEntryGate()
+  turn_completion = TurnCompletionTracker(CP.steerActuatorDelay)
   meta_constants = load_meta_constants()
   RELC = RoadEdgeLaneChangeController()
 
@@ -545,7 +551,6 @@ def main(demo=False):
       mdv2sp_send.modelDataV2SP.acceleratorState = getattr(model, 'big_model_state', 'none')
 
       action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
-      prev_action = action
       fill_model_msg(drivingdata_send, modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
                      frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, live_calib_seen, meta_constants)
@@ -579,13 +584,51 @@ def main(demo=False):
         topology, side="right", healthy=lane_topology_healthy,
         allow_unknown=right_unknown, ignore_solid=right_ignore_solid,
       )
+      gate_now_ns = time.monotonic_ns()
+      neighbors = ((bool(topology.leftNeighborExists), bool(topology.rightNeighborExists))
+                   if lane_topology_healthy else (None, None))
+      left_turn_allowed, right_turn_allowed = turn_entry.update(
+        modelv2_send.modelV2, topology, healthy=lane_topology_healthy,
+        now_ns=gate_now_ns, model_stamp_ns=meta_main.timestamp_eof,
+        neighbors=neighbors, safety_blocks=(False, False),
+        carstate=sm['carState'],
+        model_healthy=live_calib_seen and sm.all_checks(['carState', 'carControl']),
+        nav_intent=nav_lane_intent,
+        nav_state=None,
+      )
+      # Navigation does not bypass the turn entry. Both navigation and a
+      # physical driver lamp use the same geometry, neighbor and safety gate.
       DH.update(
         sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge,
         nav_lane_intent=nav_lane_intent,
         left_line_blocked=left_line_blocked, right_line_blocked=right_line_blocked,
         left_crossing_allowed=left_crossing_allowed,
         right_crossing_allowed=right_crossing_allowed,
+        left_turn_allowed=left_turn_allowed, right_turn_allowed=right_turn_allowed,
+        left_turn_keep_allowed=turn_entry.keep_allowed[0],
+        right_turn_keep_allowed=turn_entry.keep_allowed[1],
+        left_neighbor_exists=turn_entry.neighbors[0], right_neighbor_exists=turn_entry.neighbors[1],
+        turn_completed=turn_completion.update(
+          modelv2_send.modelV2, sm['carState'],
+          active=sm['carControl'].latActive and DH.turn_maneuver.state == 'active',
+          model_stamp_ns=meta_main.timestamp_eof, now_ns=gate_now_ns,
+        ),
+        turn_soft_reentry=True,
       )
+      if DH.turn_maneuver.state == 'active':
+        plan = model_output['plan'][0]
+        turn_curvature = get_curvature_from_plan(
+          plan[:, Plan.T_FROM_CURRENT_EULER][:, 2], plan[:, Plan.ORIENTATION_RATE][:, 2],
+          model.constants.T_IDXS, v_ego, lat_action_t,
+        )
+        if v_ego > model.MIN_LAT_CONTROL_SPEED:
+          turn_curvature = smooth_value(turn_curvature, prev_action.desiredCurvature, model.LAT_SMOOTH_SECONDS)
+        else:
+          turn_curvature = prev_action.desiredCurvature
+        action.desiredCurvature = float(turn_curvature)
+        modelv2_send.modelV2.action.desiredCurvature = action.desiredCurvature
+        drivingdata_send.drivingModelData.action.desiredCurvature = action.desiredCurvature
+      prev_action = action
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       mdv2sp_send.valid = modelv2_send.valid
