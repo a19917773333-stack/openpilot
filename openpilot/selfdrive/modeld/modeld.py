@@ -35,7 +35,11 @@ from openpilot.common.realtime import config_realtime_process, DT_MDL
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.common.transformations.model import get_warp_matrix
-from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
+from openpilot.selfdrive.controls.lib.desire_helper import (
+  DesireHelper,
+  get_lane_turn_curvature_scale,
+  scale_turn_curvature,
+)
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, should_stop, smooth_value, get_curvature_from_plan
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
 from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_driving_model_data, fill_pose_msg, PublishState
@@ -368,6 +372,7 @@ def main(demo=False):
   prev_action = log.ModelDataV2.Action()
 
   DH = DesireHelper()
+  turn_curvature_scale = get_lane_turn_curvature_scale(params)
   RELC = RoadEdgeLaneChangeController()
   LINE_BLOCKER = LaneChangeBoundaryBlocker()
 
@@ -410,6 +415,8 @@ def main(demo=False):
     frame_id = sm["narrowRoadCameraState"].frameId
     v_ego = max(sm["carState"].vEgo, 0.)
     model.lat_delay = get_lat_delay(params, sm["lateralDelay"].lateralDelay)
+    if run_count % 60 == 0:
+      turn_curvature_scale = get_lane_turn_curvature_scale(params)
     lat_delay = sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS
     if sm.updated["extrinsicsCalibration"] and sm.seen['narrowRoadCameraState'] and sm.seen['deviceState']:
       device_from_calib_euler = np.array(sm["extrinsicsCalibration"].rpyCalib, dtype=np.float32)
@@ -486,7 +493,6 @@ def main(demo=False):
       mdv2sp_send = messaging.new_message('modelDataV2SP')
 
       action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
-      prev_action = action
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
                      frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, extrinsics_calibration_seen)
@@ -531,6 +537,12 @@ def main(demo=False):
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       mdv2sp_send.valid = modelv2_send.valid
       mdv2sp_send.modelDataV2SP.laneTurnDirection = DH.lane_turn_direction
+      action.desiredCurvature = scale_turn_curvature(
+        action.desiredCurvature, DH.lane_turn_direction, turn_curvature_scale,
+      )
+      modelv2_send.modelV2.action.desiredCurvature = action.desiredCurvature
+      drivingdata_send.drivingModelData.action.desiredCurvature = action.desiredCurvature
+      prev_action = action
 
       fill_driving_model_data(drivingdata_send, modelv2_send)
       fill_pose_msg(posenet_send, model_output, meta_main.frame_id, vipc_dropped_frames, meta_main.timestamp_eof, extrinsics_calibration_seen)

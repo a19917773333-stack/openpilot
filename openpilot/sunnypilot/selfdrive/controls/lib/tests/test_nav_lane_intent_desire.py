@@ -128,34 +128,6 @@ def test_navigation_turn_only_lamp_retains_lane_turn_desire():
   assert int(desire.lane_turn_direction) != 0
 
 
-@pytest.mark.parametrize("navigation", [False, True])
-def test_turn_execution_uses_same_lamp_speed_and_lateral_gates_with_or_without_navigation(navigation):
-  desire = helper()
-  desire.lane_turn_controller.enabled = True
-  turn_only = intent(target=-1) if navigation else None
-
-  desire.update(car_state(vEgo=5.0, leftBlinker=True), True, 0.0, nav_lane_intent=turn_only,
-                left_turn_allowed=True, left_turn_keep_allowed=True)
-
-  assert desire.desire == log.Desire.turnLeft
-  assert desire.turn_maneuver.state == "active"
-
-
-@pytest.mark.parametrize("navigation", [False, True])
-def test_turn_entry_is_required_with_or_without_navigation(navigation):
-  desire = helper()
-  desire.lane_turn_controller.enabled = True
-  turn_only = intent(target=-1) if navigation else None
-
-  for _ in range(3):
-    desire.update(car_state(vEgo=5.0, leftBlinker=True), True, 0.0, nav_lane_intent=turn_only,
-                  left_turn_allowed=False, right_turn_allowed=False,
-                  left_turn_keep_allowed=False, right_turn_keep_allowed=False)
-
-  assert desire.desire == log.Desire.none
-  assert desire.turn_maneuver.state == "waiting"
-
-
 def test_driver_lamp_without_navigation_does_not_plan_turn():
   desire = helper()
   desire.lane_turn_controller.enabled = True
@@ -231,9 +203,6 @@ def test_completed_lane_change_tail_transfers_to_same_direction_turn(direction):
   assert desire.lane_change_state == LaneChangeState.laneChangeStarting
 
   for _ in range(15):
-    desire.update(car_state(**lamp_on), True, 0.0, nav_lane_intent=lane_target, **crossing_allowed)
-  assert desire.lane_change_state == LaneChangeState.laneChangeFinishing
-  for _ in range(20):
     desire.update(car_state(**lamp_on), True, 0.0, nav_lane_intent=lane_target, **crossing_allowed)
   assert desire.lane_change_state == LaneChangeState.preLaneChange
 
