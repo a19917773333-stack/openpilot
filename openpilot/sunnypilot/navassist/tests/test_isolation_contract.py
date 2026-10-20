@@ -112,7 +112,13 @@ def test_both_model_runners_consume_typed_navigation_intent_and_lane_change_bloc
     assert "right_crossing_allowed=" in source
     assert "left_line_blocked=left_line_blocked" in source
     assert "right_line_blocked=right_line_blocked" in source
-    assert "navAssistStateSP" not in source
+    # navAssistStateSP may only be subscribed and used to validate the
+    # navigation turn session in the turn-entry gate. Lane-change
+    # authorization still comes from navLaneIntentSP and lane topology.
+    nav_lines = [line.strip() for line in source.splitlines() if "navAssistStateSP" in line]
+    assert len(nav_lines) == 2, nav_lines
+    assert nav_lines[0].startswith('"carControl"'), nav_lines
+    assert nav_lines[1].startswith("nav_state=sm['navAssistStateSP']"), nav_lines
 
 
 def test_local_localization_requires_alive_valid_and_bounded_age():
